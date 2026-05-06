@@ -1,0 +1,15 @@
+[Unit]
+Description=Pickleball Booker Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/pickleball-booker
+ExecStart=/usr/bin/xvfb-run --auto-servernum /root/pickleball-booker/.venv/bin/python /root/pickleball-booker/bot_listener.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/pickleball-booker/data/bot.log
+StandardError=append:/root/pickleball-booker/data/bot.log
+
+[Install]
+WantedBy=multi-user.target
