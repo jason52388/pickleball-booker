@@ -89,26 +89,26 @@ jobs:
             docker compose -f /root/pickleball-booker/docker-compose.yml up -d --remove-orphans
         env:
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
-          CPD_URL: ${{ secrets.CPD_URL }}
-          CPD_USERNAME: ${{ secrets.CPD_USERNAME }}
+          CPD_URL: ${{ vars.CPD_URL || secrets.CPD_URL }}
+          CPD_USERNAME: ${{ vars.CPD_USERNAME || secrets.CPD_USERNAME }}
           CPD_PASSWORD: ${{ secrets.CPD_PASSWORD }}
-          BOOKING_EVENT_NAME: ${{ secrets.BOOKING_EVENT_NAME }}
-          BOOKING_LOCK_ENABLED: ${{ secrets.BOOKING_LOCK_ENABLED }}
-          DRY_RUN: ${{ secrets.DRY_RUN }}
-          PREVIEW_STOP_BEFORE_PAY: ${{ secrets.PREVIEW_STOP_BEFORE_PAY }}
-          TARGET_FACILITY: ${{ secrets.TARGET_FACILITY }}
-          PICKLEBALL_INCLUDE: ${{ secrets.PICKLEBALL_INCLUDE }}
-          PICKLEBALL_EXCLUDE: ${{ secrets.PICKLEBALL_EXCLUDE }}
-          PREFERRED_START_HOUR: ${{ secrets.PREFERRED_START_HOUR }}
-          PREFERRED_END_HOUR: ${{ secrets.PREFERRED_END_HOUR }}
+          BOOKING_EVENT_NAME: ${{ vars.BOOKING_EVENT_NAME || secrets.BOOKING_EVENT_NAME }}
+          BOOKING_LOCK_ENABLED: ${{ vars.BOOKING_LOCK_ENABLED || secrets.BOOKING_LOCK_ENABLED }}
+          DRY_RUN: ${{ vars.DRY_RUN || secrets.DRY_RUN }}
+          PREVIEW_STOP_BEFORE_PAY: ${{ vars.PREVIEW_STOP_BEFORE_PAY || secrets.PREVIEW_STOP_BEFORE_PAY }}
+          TARGET_FACILITY: ${{ vars.TARGET_FACILITY || secrets.TARGET_FACILITY }}
+          PICKLEBALL_INCLUDE: ${{ vars.PICKLEBALL_INCLUDE || secrets.PICKLEBALL_INCLUDE }}
+          PICKLEBALL_EXCLUDE: ${{ vars.PICKLEBALL_EXCLUDE || secrets.PICKLEBALL_EXCLUDE }}
+          PREFERRED_START_HOUR: ${{ vars.PREFERRED_START_HOUR || secrets.PREFERRED_START_HOUR }}
+          PREFERRED_END_HOUR: ${{ vars.PREFERRED_END_HOUR || secrets.PREFERRED_END_HOUR }}
           CREDIT_CARD_CVV: ${{ secrets.CREDIT_CARD_CVV }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
+          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID || secrets.TELEGRAM_CHAT_ID }}
+          SMTP_USER: ${{ vars.SMTP_USER || secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          CALENDAR_INVITE_EMAILS: ${{ secrets.CALENDAR_INVITE_EMAILS }}
-          BROWSER_HEADLESS: ${{ secrets.BROWSER_HEADLESS }}
-          ISP_PROXY_HOST: ${{ secrets.ISP_PROXY_HOST }}
-          ISP_PROXY_PORT: ${{ secrets.ISP_PROXY_PORT }}
-          ISP_PROXY_USERNAME: ${{ secrets.ISP_PROXY_USERNAME }}
+          CALENDAR_INVITE_EMAILS: ${{ vars.CALENDAR_INVITE_EMAILS || secrets.CALENDAR_INVITE_EMAILS }}
+          BROWSER_HEADLESS: ${{ vars.BROWSER_HEADLESS || secrets.BROWSER_HEADLESS }}
+          ISP_PROXY_HOST: ${{ vars.ISP_PROXY_HOST || secrets.ISP_PROXY_HOST }}
+          ISP_PROXY_PORT: ${{ vars.ISP_PROXY_PORT || secrets.ISP_PROXY_PORT }}
+          ISP_PROXY_USERNAME: ${{ vars.ISP_PROXY_USERNAME || secrets.ISP_PROXY_USERNAME }}
           ISP_PROXY_PASSWORD: ${{ secrets.ISP_PROXY_PASSWORD }}
