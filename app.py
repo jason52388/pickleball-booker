@@ -264,43 +264,6 @@ def set_weekend_booking_lock(saturday: datetime, sunday: datetime, slot: Slot, r
     write_json_file(BOOKED_WEEKENDS_FILE, payload)
 
 
-INBOUND_REPLIES_FILE = DATA_DIR / "inbound_replies.json"
-
-
-def normalize_phone(value: str) -> str:
-    return re.sub(r"[^0-9+]", "", value or "")
-
-
-def read_inbound_replies() -> list:
-    if not INBOUND_REPLIES_FILE.exists():
-        return []
-    return read_json_file(INBOUND_REPLIES_FILE, [])
-
-
-def poll_interval_seconds() -> int:
-    return int(os.getenv("SMS_POLL_INTERVAL_SECONDS", "10"))
-
-
-def wait_for_sms_choice(run_id: str, options_count: int) -> Optional[str]:
-    timeout_seconds = int(os.getenv("TWILIO_APPROVAL_TIMEOUT_SECONDS", "600"))
-    expected = normalize_phone(os.getenv("TWILIO_EXPECTED_FROM_NUMBER", ""))
-    started = time.time()
-
-    while time.time() - started < timeout_seconds:
-        for entry in reversed(read_inbound_replies()):
-            if entry.get("run_id") != run_id:
-                continue
-            if normalize_phone(entry.get("from", "")) != expected:
-                continue
-            body = (entry.get("body") or "").strip().upper()
-            if body == "N":
-                return "N"
-            if body.isdigit():
-                num = int(body)
-                if 1 <= num <= options_count:
-                    return body
-        time.sleep(poll_interval_seconds())
-    return None
 
 
 class CPDBooker:
