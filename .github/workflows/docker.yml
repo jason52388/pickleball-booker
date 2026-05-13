@@ -33,12 +33,63 @@ jobs:
     needs: build
 
     steps:
-      - name: Deploy to VPS
+      - name: Write .env and deploy to VPS
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: CPD_URL,CPD_USERNAME,CPD_PASSWORD,BOOKING_EVENT_NAME,BOOKING_LOCK_ENABLED,DRY_RUN,PREVIEW_STOP_BEFORE_PAY,TARGET_FACILITY,PICKLEBALL_INCLUDE,PICKLEBALL_EXCLUDE,PREFERRED_START_HOUR,PREFERRED_END_HOUR,CREDIT_CARD_CVV,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,SMTP_USER,SMTP_PASSWORD,CALENDAR_INVITE_EMAILS,BROWSER_HEADLESS,ISP_PROXY_HOST,ISP_PROXY_PORT,ISP_PROXY_USERNAME,ISP_PROXY_PASSWORD
           script: |
+            mkdir -p /root/pickleball-booker
+            cat > /root/pickleball-booker/.env <<EOF
+            CPD_URL=$CPD_URL
+            CPD_USERNAME=$CPD_USERNAME
+            CPD_PASSWORD=$CPD_PASSWORD
+            BOOKING_EVENT_NAME=$BOOKING_EVENT_NAME
+            BOOKING_LOCK_ENABLED=$BOOKING_LOCK_ENABLED
+            DRY_RUN=$DRY_RUN
+            PREVIEW_STOP_BEFORE_PAY=$PREVIEW_STOP_BEFORE_PAY
+            TARGET_FACILITY=$TARGET_FACILITY
+            PICKLEBALL_INCLUDE=$PICKLEBALL_INCLUDE
+            PICKLEBALL_EXCLUDE=$PICKLEBALL_EXCLUDE
+            PREFERRED_START_HOUR=$PREFERRED_START_HOUR
+            PREFERRED_END_HOUR=$PREFERRED_END_HOUR
+            CREDIT_CARD_CVV=$CREDIT_CARD_CVV
+            TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
+            TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
+            SMTP_USER=$SMTP_USER
+            SMTP_PASSWORD=$SMTP_PASSWORD
+            CALENDAR_INVITE_EMAILS=$CALENDAR_INVITE_EMAILS
+            BROWSER_HEADLESS=$BROWSER_HEADLESS
+            ISP_PROXY_HOST=$ISP_PROXY_HOST
+            ISP_PROXY_PORT=$ISP_PROXY_PORT
+            ISP_PROXY_USERNAME=$ISP_PROXY_USERNAME
+            ISP_PROXY_PASSWORD=$ISP_PROXY_PASSWORD
+            EOF
             docker compose -f /root/pickleball-booker/docker-compose.yml pull
             docker compose -f /root/pickleball-booker/docker-compose.yml up -d --remove-orphans
+        env:
+          CPD_URL: ${{ secrets.CPD_URL }}
+          CPD_USERNAME: ${{ secrets.CPD_USERNAME }}
+          CPD_PASSWORD: ${{ secrets.CPD_PASSWORD }}
+          BOOKING_EVENT_NAME: ${{ secrets.BOOKING_EVENT_NAME }}
+          BOOKING_LOCK_ENABLED: ${{ secrets.BOOKING_LOCK_ENABLED }}
+          DRY_RUN: ${{ secrets.DRY_RUN }}
+          PREVIEW_STOP_BEFORE_PAY: ${{ secrets.PREVIEW_STOP_BEFORE_PAY }}
+          TARGET_FACILITY: ${{ secrets.TARGET_FACILITY }}
+          PICKLEBALL_INCLUDE: ${{ secrets.PICKLEBALL_INCLUDE }}
+          PICKLEBALL_EXCLUDE: ${{ secrets.PICKLEBALL_EXCLUDE }}
+          PREFERRED_START_HOUR: ${{ secrets.PREFERRED_START_HOUR }}
+          PREFERRED_END_HOUR: ${{ secrets.PREFERRED_END_HOUR }}
+          CREDIT_CARD_CVV: ${{ secrets.CREDIT_CARD_CVV }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          CALENDAR_INVITE_EMAILS: ${{ secrets.CALENDAR_INVITE_EMAILS }}
+          BROWSER_HEADLESS: ${{ secrets.BROWSER_HEADLESS }}
+          ISP_PROXY_HOST: ${{ secrets.ISP_PROXY_HOST }}
+          ISP_PROXY_PORT: ${{ secrets.ISP_PROXY_PORT }}
+          ISP_PROXY_USERNAME: ${{ secrets.ISP_PROXY_USERNAME }}
+          ISP_PROXY_PASSWORD: ${{ secrets.ISP_PROXY_PASSWORD }}
