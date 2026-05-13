@@ -1,6 +1,6 @@
 services:
   pickleball:
-    build: .
+    image: ghcr.io/jason52388/pickleball-booker:latest
     restart: unless-stopped
     env_file: .env
     volumes:
