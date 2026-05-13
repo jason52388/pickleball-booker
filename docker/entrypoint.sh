@@ -8,4 +8,4 @@ printenv | grep -v "^_=" | grep -v "^SHLVL=" >> /etc/environment
 cron
 
 echo "Starting Telegram bot listener..."
-exec python bot_listener.py
+exec python3 bot_listener.py
