@@ -39,11 +39,11 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: CPD_URL,CPD_USERNAME,CPD_PASSWORD,BOOKING_EVENT_NAME,BOOKING_LOCK_ENABLED,DRY_RUN,PREVIEW_STOP_BEFORE_PAY,TARGET_FACILITY,PICKLEBALL_INCLUDE,PICKLEBALL_EXCLUDE,PREFERRED_START_HOUR,PREFERRED_END_HOUR,CREDIT_CARD_CVV,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,SMTP_USER,SMTP_PASSWORD,CALENDAR_INVITE_EMAILS,BROWSER_HEADLESS,ISP_PROXY_HOST,ISP_PROXY_PORT,ISP_PROXY_USERNAME,ISP_PROXY_PASSWORD
+          envs: DEPLOY_TOKEN,CPD_URL,CPD_USERNAME,CPD_PASSWORD,BOOKING_EVENT_NAME,BOOKING_LOCK_ENABLED,DRY_RUN,PREVIEW_STOP_BEFORE_PAY,TARGET_FACILITY,PICKLEBALL_INCLUDE,PICKLEBALL_EXCLUDE,PREFERRED_START_HOUR,PREFERRED_END_HOUR,CREDIT_CARD_CVV,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,SMTP_USER,SMTP_PASSWORD,CALENDAR_INVITE_EMAILS,BROWSER_HEADLESS,ISP_PROXY_HOST,ISP_PROXY_PORT,ISP_PROXY_USERNAME,ISP_PROXY_PASSWORD
           script: |
             if [ ! -d /root/pickleball-booker/.git ]; then
               rm -rf /root/pickleball-booker
-              git clone https://github.com/jason52388/pickleball-booker.git /root/pickleball-booker
+              git clone https://gh-token:$DEPLOY_TOKEN@github.com/jason52388/pickleball-booker.git /root/pickleball-booker
             else
               git -C /root/pickleball-booker pull origin main
             fi
@@ -75,6 +75,7 @@ jobs:
             docker compose -f /root/pickleball-booker/docker-compose.yml pull
             docker compose -f /root/pickleball-booker/docker-compose.yml up -d --remove-orphans
         env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
           CPD_URL: ${{ secrets.CPD_URL }}
           CPD_USERNAME: ${{ secrets.CPD_USERNAME }}
           CPD_PASSWORD: ${{ secrets.CPD_PASSWORD }}
