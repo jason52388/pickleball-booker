@@ -340,6 +340,8 @@ class CPDBooker:
             return
         self._click_any(
             [
+                ("css", "a:has-text('Sign In')"),
+                ("css", "a:has-text('Sign in')"),
                 ("role_link", r"sign in|log in"),
                 ("role_button", r"sign in|log in"),
                 ("css", "a[href*='login'], a[href*='signin']"),
