@@ -41,37 +41,50 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           envs: DEPLOY_TOKEN,CPD_URL,CPD_USERNAME,CPD_PASSWORD,BOOKING_EVENT_NAME,BOOKING_LOCK_ENABLED,DRY_RUN,PREVIEW_STOP_BEFORE_PAY,TARGET_FACILITY,PICKLEBALL_INCLUDE,PICKLEBALL_EXCLUDE,PREFERRED_START_HOUR,PREFERRED_END_HOUR,CREDIT_CARD_CVV,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,SMTP_USER,SMTP_PASSWORD,CALENDAR_INVITE_EMAILS,BROWSER_HEADLESS,ISP_PROXY_HOST,ISP_PROXY_PORT,ISP_PROXY_USERNAME,ISP_PROXY_PASSWORD
           script: |
+            # Clone or update repo
             if [ ! -d /root/pickleball-booker/.git ]; then
               rm -rf /root/pickleball-booker
               git clone https://gh-token:$DEPLOY_TOKEN@github.com/jason52388/pickleball-booker.git /root/pickleball-booker
             else
+              git -C /root/pickleball-booker remote set-url origin https://gh-token:$DEPLOY_TOKEN@github.com/jason52388/pickleball-booker.git
               git -C /root/pickleball-booker pull origin main
             fi
-            cat > /root/pickleball-booker/.env <<EOF
-            CPD_URL=$CPD_URL
-            CPD_USERNAME=$CPD_USERNAME
-            CPD_PASSWORD=$CPD_PASSWORD
-            BOOKING_EVENT_NAME=$BOOKING_EVENT_NAME
-            BOOKING_LOCK_ENABLED=$BOOKING_LOCK_ENABLED
-            DRY_RUN=$DRY_RUN
-            PREVIEW_STOP_BEFORE_PAY=$PREVIEW_STOP_BEFORE_PAY
-            TARGET_FACILITY=$TARGET_FACILITY
-            PICKLEBALL_INCLUDE=$PICKLEBALL_INCLUDE
-            PICKLEBALL_EXCLUDE=$PICKLEBALL_EXCLUDE
-            PREFERRED_START_HOUR=$PREFERRED_START_HOUR
-            PREFERRED_END_HOUR=$PREFERRED_END_HOUR
-            CREDIT_CARD_CVV=$CREDIT_CARD_CVV
-            TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
-            TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
-            SMTP_USER=$SMTP_USER
-            SMTP_PASSWORD=$SMTP_PASSWORD
-            CALENDAR_INVITE_EMAILS=$CALENDAR_INVITE_EMAILS
-            BROWSER_HEADLESS=$BROWSER_HEADLESS
-            ISP_PROXY_HOST=$ISP_PROXY_HOST
-            ISP_PROXY_PORT=$ISP_PROXY_PORT
-            ISP_PROXY_USERNAME=$ISP_PROXY_USERNAME
-            ISP_PROXY_PASSWORD=$ISP_PROXY_PASSWORD
-            EOF
+
+            # Ensure data directory exists for volume mount
+            mkdir -p /root/pickleball-booker/data
+
+            # Write .env from secrets
+            cat > /root/pickleball-booker/.env << ENVEOF
+            CPD_URL=${CPD_URL}
+            CPD_USERNAME=${CPD_USERNAME}
+            CPD_PASSWORD=${CPD_PASSWORD}
+            BOOKING_EVENT_NAME=${BOOKING_EVENT_NAME}
+            BOOKING_LOCK_ENABLED=${BOOKING_LOCK_ENABLED}
+            DRY_RUN=${DRY_RUN}
+            PREVIEW_STOP_BEFORE_PAY=${PREVIEW_STOP_BEFORE_PAY}
+            TARGET_FACILITY=${TARGET_FACILITY}
+            PICKLEBALL_INCLUDE=${PICKLEBALL_INCLUDE}
+            PICKLEBALL_EXCLUDE=${PICKLEBALL_EXCLUDE}
+            PREFERRED_START_HOUR=${PREFERRED_START_HOUR}
+            PREFERRED_END_HOUR=${PREFERRED_END_HOUR}
+            CREDIT_CARD_CVV=${CREDIT_CARD_CVV}
+            TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+            TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+            SMTP_USER=${SMTP_USER}
+            SMTP_PASSWORD=${SMTP_PASSWORD}
+            CALENDAR_INVITE_EMAILS=${CALENDAR_INVITE_EMAILS}
+            BROWSER_HEADLESS=${BROWSER_HEADLESS}
+            ISP_PROXY_HOST=${ISP_PROXY_HOST}
+            ISP_PROXY_PORT=${ISP_PROXY_PORT}
+            ISP_PROXY_USERNAME=${ISP_PROXY_USERNAME}
+            ISP_PROXY_PASSWORD=${ISP_PROXY_PASSWORD}
+            ENVEOF
+            sed -i 's/^[[:space:]]*//' /root/pickleball-booker/.env
+
+            # Log in to ghcr.io so the VPS can pull the private image
+            echo $DEPLOY_TOKEN | docker login ghcr.io -u jason52388 --password-stdin
+
+            # Pull new image and restart
             docker compose -f /root/pickleball-booker/docker-compose.yml pull
             docker compose -f /root/pickleball-booker/docker-compose.yml up -d --remove-orphans
         env:
