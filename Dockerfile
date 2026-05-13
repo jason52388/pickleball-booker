@@ -9,7 +9,7 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt && \
     playwright install --with-deps chromium && \
-    apt-get install -y --no-install-recommends xvfb cron && \
+    apt-get install -y --no-install-recommends xvfb xauth cron && \
     rm -rf /var/lib/apt/lists/*
 
 COPY . .
