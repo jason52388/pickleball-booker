@@ -362,7 +362,14 @@ class CPDBooker:
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
         sign_in.click(timeout=8000, no_wait_after=True)
-        # Wait for the sign-in page to render before filling.
+        # Wait for the signin page to load (no_wait_after skips Playwright's built-in nav wait)
+        try:
+            self.page.wait_for_url("**/signin**", timeout=30000)
+            self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        self.page.wait_for_timeout(1000)
+        # Wait for the email input to be visible before filling.
         email_selector = (
             "input[placeholder*='Email' i], input[aria-label*='Email' i], "
             "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"
