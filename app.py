@@ -801,7 +801,11 @@ def main() -> None:
     now_ct = datetime.now(chicago)
     # Sunday=6 days before Saturday, Monday=5 days before Saturday
     send_no_avail_notification = now_ct.weekday() in (6, 0)
-    deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
+    if is_dry_run_enabled():
+        # In dry-run mode allow a 5-minute window from now so testing works any time of day.
+        deadline_ct = now_ct + timedelta(minutes=5)
+    else:
+        deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
 
     saturday, sunday = upcoming_weekend(now_ct)
 
