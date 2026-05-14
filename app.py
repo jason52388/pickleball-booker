@@ -351,19 +351,24 @@ class CPDBooker:
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
         sign_in.click(timeout=8000, no_wait_after=True)
-        # Wait for the login modal/form to render before filling.
-        self.page.locator(
+        # Wait for the sign-in page to render before filling.
+        email_selector = (
+            "input[placeholder*='Email' i], input[aria-label*='Email' i], "
             "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"
-        ).first.wait_for(state="visible", timeout=15000)
+        )
+        self.page.locator(email_selector).first.wait_for(state="visible", timeout=20000)
         self._fill_any(
             [
                 ("label", r"email|username"),
-                ("css", "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"),
+                ("css", email_selector),
             ],
             self.username,
         )
         self._fill_any(
-            [("label", r"password"), ("css", "input[type='password']")],
+            [
+                ("label", r"password"),
+                ("css", "input[type='password'], input[aria-label*='Password' i]"),
+            ],
             self.password,
         )
         self._click_any(
