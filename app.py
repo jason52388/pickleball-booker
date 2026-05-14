@@ -343,7 +343,7 @@ class CPDBooker:
         # Wait for Sign In to be stable before clicking
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
-        sign_in.click(timeout=8000)
+        sign_in.click(timeout=8000, no_wait_after=True)
         self._fill_any(
             [("label", r"email|username"), ("css", "input[type='email'], input[name*='user']")],
             self.username,
