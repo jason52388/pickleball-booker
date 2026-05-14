@@ -331,7 +331,14 @@ class CPDBooker:
             return True
 
     def login(self) -> None:
-        self.page.goto(self.url, wait_until="domcontentloaded")
+        for attempt in range(3):
+            try:
+                self.page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                self.page.wait_for_timeout(3000)
         if self._is_logged_in():
             # Already authenticated — just reload the reservation page
             try:
