@@ -18,7 +18,6 @@ from app import (
     send_calendar_invite, set_weekend_booking_lock,
     is_dry_run_enabled, upcoming_weekend,
 )
-from pathlib import Path
 from typing import List, Optional
 
 
