@@ -351,8 +351,15 @@ class CPDBooker:
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
         sign_in.click(timeout=8000, no_wait_after=True)
+        # Wait for the login modal/form to render before filling.
+        self.page.locator(
+            "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"
+        ).first.wait_for(state="visible", timeout=15000)
         self._fill_any(
-            [("label", r"email|username"), ("css", "input[type='email'], input[name*='user']")],
+            [
+                ("label", r"email|username"),
+                ("css", "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"),
+            ],
             self.username,
         )
         self._fill_any(
@@ -383,11 +390,11 @@ class CPDBooker:
         for kind, value in selectors:
             try:
                 if kind == "role_link":
-                    self.page.get_by_role("link", name=re.compile(value, re.I)).first.click(timeout=3000)
+                    self.page.get_by_role("link", name=re.compile(value, re.I)).first.click(timeout=10000)
                 elif kind == "role_button":
-                    self.page.get_by_role("button", name=re.compile(value, re.I)).first.click(timeout=3000)
+                    self.page.get_by_role("button", name=re.compile(value, re.I)).first.click(timeout=10000)
                 elif kind == "css":
-                    self.page.locator(value).first.click(timeout=3000)
+                    self.page.locator(value).first.click(timeout=10000)
                 else:
                     continue
                 return
@@ -405,7 +412,7 @@ class CPDBooker:
                     locator = self.page.locator(selector).first
                 else:
                     continue
-                locator.fill(value, timeout=3000)
+                locator.fill(value, timeout=10000)
                 return
             except Exception as exc:  # pragma: no cover - browser-dependent
                 last_error = exc
@@ -524,7 +531,7 @@ class CPDBooker:
             event_name = os.getenv("BOOKING_EVENT_NAME", "Pickleball")
             try:
                 name_input = self.page.get_by_label(re.compile("event name", re.I)).first
-                name_input.click(timeout=3000)
+                name_input.click(timeout=10000)
                 self._human_pause(0.3, 0.7)
                 # Type character by character like a human
                 for ch in event_name:
