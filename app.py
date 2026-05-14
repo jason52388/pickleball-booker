@@ -273,7 +273,6 @@ class CPDBooker:
         self.password = os.environ["CPD_PASSWORD"]
         self.browser = None
         self.page = None
-        self.last_scrape_lines: List[str] = []
 
     def __enter__(self):
         self.pw = sync_playwright().start()
@@ -438,28 +437,6 @@ class CPDBooker:
         # The availability grid re-renders asynchronously after networkidle fires.
         # A fixed buffer is needed because cells update in-place after the network is idle.
         self.page.wait_for_timeout(3000)
-
-    def _extract_candidate_lines(self) -> List[str]:
-        candidate_lines: List[str] = []
-        selectors = [
-            "[class*='schedule']",
-            "[class*='availability']",
-            "[class*='booking']",
-            "table",
-            "body",
-        ]
-        for selector in selectors:
-            blocks = self.page.locator(selector)
-            count = min(blocks.count(), 6)
-            for idx in range(count):
-                try:
-                    text = blocks.nth(idx).inner_text(timeout=1500)
-                except Exception:
-                    continue
-                candidate_lines.extend(t.strip() for t in text.splitlines() if t.strip())
-        deduped = list(dict.fromkeys(candidate_lines))
-        self.last_scrape_lines = deduped
-        return deduped
 
     def scrape_slots(self, target_date: datetime, day_label: str) -> List[Slot]:
         extracted = self.page.evaluate(
@@ -755,14 +732,17 @@ def send_no_availability_email(saturday: datetime, sunday: datetime) -> None:
         f"You may want to check manually at:\n"
         f"https://anc.apm.activecommunities.com/chicagoparkdistrict/reservation/landing/quick?groupId=2\n"
     )
-    msg = MIMEMultipart("mixed")
-    msg["From"] = smtp_user
-    msg["To"] = recipients[0]
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(smtp_user, smtp_password)
-        server.send_message(msg)
+    try:
+        msg = MIMEMultipart("mixed")
+        msg["From"] = smtp_user
+        msg["To"] = recipients[0]
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+    except Exception as e:
+        print(f"send_no_availability_email: failed — {e}")
 
 
 def main() -> None:
@@ -775,7 +755,7 @@ def main() -> None:
     send_no_avail_notification = now_ct.weekday() in (6, 0)
     deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
 
-    saturday, sunday = upcoming_weekend(datetime.now())
+    saturday, sunday = upcoming_weekend(now_ct)
 
     if has_weekend_booking_lock(saturday, sunday):
         return
