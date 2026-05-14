@@ -362,7 +362,14 @@ class CPDBooker:
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
         sign_in.click(timeout=8000, no_wait_after=True)
-        # Wait for the sign-in page to render before filling.
+        # Wait for the signin page to load (no_wait_after skips Playwright's built-in nav wait)
+        try:
+            self.page.wait_for_url("**/signin**", timeout=30000)
+            self.page.wait_for_load_state("domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        self.page.wait_for_timeout(1000)
+        # Wait for the email input to be visible before filling.
         email_selector = (
             "input[placeholder*='Email' i], input[aria-label*='Email' i], "
             "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"
@@ -402,24 +409,16 @@ class CPDBooker:
         self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
 
     def _dismiss_modal(self) -> None:
-        """Close any blocking modal overlay before interacting with the page."""
+        """Force-remove any blocking modal overlay via JS."""
         try:
-            modal = self.page.locator(".modal.is-open, [class*='error-modal'].is-open").first
-            modal.wait_for(state="visible", timeout=2000)
-            # Try common close targets: X button, close button, or click outside
-            for selector in ["button[aria-label*='close' i]", "button[aria-label*='dismiss' i]",
-                             ".modal__close", ".an-modal__close", "button.close"]:
-                try:
-                    self.page.locator(selector).first.click(timeout=1000)
-                    self.page.wait_for_timeout(500)
-                    return
-                except Exception:
-                    continue
-            # Last resort: press Escape
-            self.page.keyboard.press("Escape")
-            self.page.wait_for_timeout(500)
+            self.page.evaluate("""
+                document.querySelectorAll('.modal.is-open, [class*="error-modal"]').forEach(el => el.remove());
+                document.body.classList.remove('modal-open', 'is-modal-open', 'has-modal');
+                document.documentElement.classList.remove('modal-open', 'is-modal-open');
+            """)
+            self.page.wait_for_timeout(300)
         except Exception:
-            pass  # No modal present — that's fine
+            pass
 
     def _click_any(self, selectors: Sequence[Tuple[str, str]]) -> None:
         last_error = None
@@ -457,8 +456,9 @@ class CPDBooker:
     def open_target_day(self, target_date: datetime) -> None:
         # The date picker is a custom combobox (inputmode="none") — fill() is ignored.
         # Must click to open the calendar popup, navigate months, then click the target day.
+        self._dismiss_modal()
         date_input = self.page.get_by_label("Date picker, current date")
-        date_input.click(timeout=5000)
+        date_input.click(timeout=10000)
         self.page.locator(".an-calendar").wait_for(timeout=5000)
 
         target_month = target_date.strftime("%B %Y")  # e.g. "May 2026"
@@ -488,7 +488,7 @@ class CPDBooker:
 
     def scrape_slots(self, target_date: datetime, day_label: str) -> List[Slot]:
         extracted = self.page.evaluate(
-            """
+            r"""
             () => {
               const table = document.querySelector('table');
               if (!table) return [];
@@ -801,7 +801,11 @@ def main() -> None:
     now_ct = datetime.now(chicago)
     # Sunday=6 days before Saturday, Monday=5 days before Saturday
     send_no_avail_notification = now_ct.weekday() in (6, 0)
-    deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
+    if is_dry_run_enabled():
+        # In dry-run mode allow a 5-minute window from now so testing works any time of day.
+        deadline_ct = now_ct + timedelta(minutes=5)
+    else:
+        deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
 
     saturday, sunday = upcoming_weekend(now_ct)
 
