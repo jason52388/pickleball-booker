@@ -480,7 +480,7 @@ class CPDBooker:
 
     def scrape_slots(self, target_date: datetime, day_label: str) -> List[Slot]:
         extracted = self.page.evaluate(
-            """
+            r"""
             () => {
               const table = document.querySelector('table');
               if (!table) return [];
