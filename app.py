@@ -402,24 +402,16 @@ class CPDBooker:
         self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
 
     def _dismiss_modal(self) -> None:
-        """Close any blocking modal overlay before interacting with the page."""
+        """Force-remove any blocking modal overlay via JS."""
         try:
-            modal = self.page.locator(".modal.is-open, [class*='error-modal'].is-open").first
-            modal.wait_for(state="visible", timeout=2000)
-            # Try common close targets: X button, close button, or click outside
-            for selector in ["button[aria-label*='close' i]", "button[aria-label*='dismiss' i]",
-                             ".modal__close", ".an-modal__close", "button.close"]:
-                try:
-                    self.page.locator(selector).first.click(timeout=1000)
-                    self.page.wait_for_timeout(500)
-                    return
-                except Exception:
-                    continue
-            # Last resort: press Escape
-            self.page.keyboard.press("Escape")
-            self.page.wait_for_timeout(500)
+            self.page.evaluate("""
+                document.querySelectorAll('.modal.is-open, [class*="error-modal"]').forEach(el => el.remove());
+                document.body.classList.remove('modal-open', 'is-modal-open', 'has-modal');
+                document.documentElement.classList.remove('modal-open', 'is-modal-open');
+            """)
+            self.page.wait_for_timeout(300)
         except Exception:
-            pass  # No modal present — that's fine
+            pass
 
     def _click_any(self, selectors: Sequence[Tuple[str, str]]) -> None:
         last_error = None
