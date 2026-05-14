@@ -75,6 +75,10 @@ def run() -> None:
 
     while True:
         resp = _telegram_api("getUpdates", {"offset": offset, "timeout": 30})
+        # If the API call failed (returned {}), back off to avoid hammering Telegram.
+        if not resp.get("ok"):
+            time.sleep(5)
+            continue
         for update in resp.get("result", []):
             offset = update["update_id"] + 1
 

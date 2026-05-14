@@ -151,6 +151,9 @@ def wait_for_telegram_choice(options_count: int, timeout: int = 600) -> Optional
     deadline = time.time() + timeout
     while time.time() < deadline:
         resp = _telegram_api("getUpdates", {"offset": offset, "timeout": 10})
+        if not resp.get("ok"):
+            time.sleep(5)
+            continue
         for update in resp.get("result", []):
             offset = update["update_id"] + 1
 
@@ -314,9 +317,15 @@ class CPDBooker:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if self.context:
-            self.context.close()
-        self.pw.stop()
+        try:
+            if self.context:
+                self.context.close()
+        except Exception:
+            pass
+        try:
+            self.pw.stop()
+        except Exception:
+            pass
 
     def _is_logged_in(self) -> bool:
         # Wait for JS to settle before checking — avoids false negatives from
