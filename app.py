@@ -449,8 +449,9 @@ class CPDBooker:
     def open_target_day(self, target_date: datetime) -> None:
         # The date picker is a custom combobox (inputmode="none") — fill() is ignored.
         # Must click to open the calendar popup, navigate months, then click the target day.
+        self._dismiss_modal()
         date_input = self.page.get_by_label("Date picker, current date")
-        date_input.click(timeout=5000)
+        date_input.click(timeout=10000)
         self.page.locator(".an-calendar").wait_for(timeout=5000)
 
         target_month = target_date.strftime("%B %Y")  # e.g. "May 2026"
