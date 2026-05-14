@@ -356,6 +356,8 @@ class CPDBooker:
                 self.page.goto(self.url, wait_until="load", timeout=60000)
             self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
             return
+        # Dismiss any error modal that may block the Sign In link
+        self._dismiss_modal()
         # Wait for Sign In to be stable before clicking
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
@@ -398,6 +400,26 @@ class CPDBooker:
         except Exception:
             self.page.goto(self.url, wait_until="load", timeout=60000)
         self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
+
+    def _dismiss_modal(self) -> None:
+        """Close any blocking modal overlay before interacting with the page."""
+        try:
+            modal = self.page.locator(".modal.is-open, [class*='error-modal'].is-open").first
+            modal.wait_for(state="visible", timeout=2000)
+            # Try common close targets: X button, close button, or click outside
+            for selector in ["button[aria-label*='close' i]", "button[aria-label*='dismiss' i]",
+                             ".modal__close", ".an-modal__close", "button.close"]:
+                try:
+                    self.page.locator(selector).first.click(timeout=1000)
+                    self.page.wait_for_timeout(500)
+                    return
+                except Exception:
+                    continue
+            # Last resort: press Escape
+            self.page.keyboard.press("Escape")
+            self.page.wait_for_timeout(500)
+        except Exception:
+            pass  # No modal present — that's fine
 
     def _click_any(self, selectors: Sequence[Tuple[str, str]]) -> None:
         last_error = None
