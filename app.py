@@ -319,9 +319,12 @@ class CPDBooker:
         self.pw.stop()
 
     def _is_logged_in(self) -> bool:
+        # Wait for JS to settle before checking — avoids false negatives from
+        # cached DOM showing "Sign In" briefly before session cookies are applied.
+        self.page.wait_for_timeout(2000)
         try:
             self.page.get_by_role("link", name=re.compile(r"sign in|log in", re.I)).first.wait_for(
-                state="visible", timeout=4000
+                state="visible", timeout=3000
             )
             return False
         except Exception:
@@ -337,15 +340,10 @@ class CPDBooker:
                 self.page.goto(self.url, wait_until="load", timeout=60000)
             self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
             return
-        self._click_any(
-            [
-                ("css", "a:has-text('Sign In')"),
-                ("css", "a:has-text('Sign in')"),
-                ("role_link", r"sign in|log in"),
-                ("role_button", r"sign in|log in"),
-                ("css", "a[href*='login'], a[href*='signin']"),
-            ]
-        )
+        # Wait for Sign In to be stable before clicking
+        sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
+        sign_in.wait_for(state="visible", timeout=10000)
+        sign_in.click(timeout=8000)
         self._fill_any(
             [("label", r"email|username"), ("css", "input[type='email'], input[name*='user']")],
             self.username,
