@@ -490,9 +490,11 @@ class CPDBooker:
     def open_target_day(self, target_date: datetime) -> None:
         # The date picker is a custom combobox (inputmode="none") — fill() is ignored.
         # Must click to open the calendar popup, navigate months, then click the target day.
+        print(f"[open_target_day] Opening {target_date.strftime('%Y-%m-%d')}...", flush=True)
         self._dismiss_modal()
         date_input = self.page.get_by_label("Date picker, current date")
         date_input.click(timeout=10000)
+        print("[open_target_day] Calendar opened.", flush=True)
         self.page.locator(".an-calendar").wait_for(timeout=5000)
 
         target_month = target_date.strftime("%B %Y")  # e.g. "May 2026"
@@ -505,7 +507,7 @@ class CPDBooker:
             self.page.locator(arrow).click()
             self.page.wait_for_timeout(400)
 
-        # Click the day number, skipping cells from adjacent months
+        print(f"[open_target_day] Clicking day {target_date.day}...", flush=True)
         day_str = str(target_date.day)
         day_cells = self.page.locator(".an-calendar-day:not(.an-calendar-day-othermonth)")
         count = day_cells.count()
@@ -515,13 +517,13 @@ class CPDBooker:
                 cell.click()
                 break
 
+        print("[open_target_day] Waiting for grid to settle...", flush=True)
         try:
             self.page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
-        # The availability grid re-renders asynchronously after networkidle fires.
-        # A fixed buffer is needed because cells update in-place after the network is idle.
         self.page.wait_for_timeout(3000)
+        print("[open_target_day] Done.", flush=True)
 
     def scrape_slots(self, target_date: datetime, day_label: str) -> List[Slot]:
         extracted = self.page.evaluate(
