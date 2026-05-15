@@ -3,9 +3,20 @@ name: Build, push, and deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Build, push image, and deploy to VPS
+        type: boolean
+        default: true
+      run_checker:
+        description: Run daily_runner once in the VPS container (after deploy, or alone if deploy is off)
+        type: boolean
+        default: true
 
 jobs:
   build:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (inputs.deploy == true || inputs.deploy == 'true'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -44,7 +55,7 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: DEPLOY_TOKEN,CPD_URL,CPD_USERNAME,CPD_PASSWORD,BOOKING_EVENT_NAME,BOOKING_LOCK_ENABLED,DRY_RUN,PREVIEW_STOP_BEFORE_PAY,TARGET_FACILITY,PICKLEBALL_INCLUDE,PICKLEBALL_EXCLUDE,PREFERRED_START_HOUR,PREFERRED_END_HOUR,CREDIT_CARD_CVV,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,SMTP_USER,SMTP_PASSWORD,CALENDAR_INVITE_EMAILS,BROWSER_HEADLESS,ISP_PROXY_HOST,ISP_PROXY_PORT,ISP_PROXY_USERNAME,ISP_PROXY_PASSWORD
+          envs: DEPLOY_TOKEN,CPD_URL,CPD_USERNAME,CPD_PASSWORD,BOOKING_EVENT_NAME,BOOKING_LOCK_ENABLED,DRY_RUN,DRY_RUN_POLL_MINUTES,PREVIEW_STOP_BEFORE_PAY,TARGET_FACILITY,PICKLEBALL_INCLUDE,PICKLEBALL_EXCLUDE,PREFERRED_START_HOUR,PREFERRED_END_HOUR,CREDIT_CARD_CVV,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID,SMTP_USER,SMTP_PASSWORD,CALENDAR_INVITE_EMAILS,BROWSER_HEADLESS,ISP_PROXY_HOST,ISP_PROXY_PORT,ISP_PROXY_USERNAME,ISP_PROXY_PASSWORD,RUN_CHECKER
           script: |
             # Clone or update repo
             if [ ! -d /root/pickleball-booker/.git ]; then
@@ -66,6 +77,7 @@ jobs:
               echo "BOOKING_EVENT_NAME=${BOOKING_EVENT_NAME}"
               echo "BOOKING_LOCK_ENABLED=${BOOKING_LOCK_ENABLED}"
               echo "DRY_RUN=${DRY_RUN}"
+              echo "DRY_RUN_POLL_MINUTES=${DRY_RUN_POLL_MINUTES}"
               echo "PREVIEW_STOP_BEFORE_PAY=${PREVIEW_STOP_BEFORE_PAY}"
               echo "TARGET_FACILITY=${TARGET_FACILITY}"
               echo "PICKLEBALL_INCLUDE=${PICKLEBALL_INCLUDE}"
@@ -91,6 +103,11 @@ jobs:
             # Pull new image and restart
             docker compose -f /root/pickleball-booker/docker-compose.yml pull
             docker compose -f /root/pickleball-booker/docker-compose.yml up -d --remove-orphans
+
+            if [ "$RUN_CHECKER" = "true" ]; then
+              echo "Running one-off daily_runner in container..."
+              docker compose -f /root/pickleball-booker/docker-compose.yml exec -T pickleball python3 /app/daily_runner.py
+            fi
         env:
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
           CPD_URL: ${{ vars.CPD_URL || secrets.CPD_URL }}
@@ -99,6 +116,7 @@ jobs:
           BOOKING_EVENT_NAME: ${{ vars.BOOKING_EVENT_NAME || secrets.BOOKING_EVENT_NAME }}
           BOOKING_LOCK_ENABLED: ${{ vars.BOOKING_LOCK_ENABLED || secrets.BOOKING_LOCK_ENABLED }}
           DRY_RUN: ${{ vars.DRY_RUN || secrets.DRY_RUN }}
+          DRY_RUN_POLL_MINUTES: ${{ vars.DRY_RUN_POLL_MINUTES || secrets.DRY_RUN_POLL_MINUTES || '30' }}
           PREVIEW_STOP_BEFORE_PAY: ${{ vars.PREVIEW_STOP_BEFORE_PAY || secrets.PREVIEW_STOP_BEFORE_PAY }}
           TARGET_FACILITY: ${{ vars.TARGET_FACILITY || secrets.TARGET_FACILITY }}
           PICKLEBALL_INCLUDE: ${{ vars.PICKLEBALL_INCLUDE || secrets.PICKLEBALL_INCLUDE }}
@@ -116,3 +134,17 @@ jobs:
           ISP_PROXY_PORT: ${{ vars.ISP_PROXY_PORT || secrets.ISP_PROXY_PORT }}
           ISP_PROXY_USERNAME: ${{ vars.ISP_PROXY_USERNAME || secrets.ISP_PROXY_USERNAME }}
           ISP_PROXY_PASSWORD: ${{ secrets.ISP_PROXY_PASSWORD }}
+          RUN_CHECKER: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_checker == true || inputs.run_checker == 'true') && (inputs.deploy == true || inputs.deploy == 'true') && 'true' || 'false' }}
+
+  vps-run-checker:
+    if: github.event_name == 'workflow_dispatch' && (inputs.run_checker == true || inputs.run_checker == 'true') && (inputs.deploy == false || inputs.deploy == 'false')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run daily_runner on VPS (no deploy)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            docker compose -f /root/pickleball-booker/docker-compose.yml exec -T pickleball python3 /app/daily_runner.py
