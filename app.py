@@ -799,8 +799,9 @@ def main() -> None:
 
     chicago = ZoneInfo("America/Chicago")
     now_ct = datetime.now(chicago)
-    # Sunday=6 days before Saturday, Monday=5 days before Saturday
-    send_no_avail_notification = now_ct.weekday() in (6, 0)
+    # Sunday=6 days before Saturday, Monday=5 days before Saturday.
+    # In dry-run mode always send so testing works any day of the week.
+    send_no_avail_notification = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
     if is_dry_run_enabled():
         # In dry-run mode allow a 5-minute window from now so testing works any time of day.
         deadline_ct = now_ct + timedelta(minutes=5)
