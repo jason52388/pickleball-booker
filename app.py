@@ -375,7 +375,6 @@ class CPDBooker:
             return True
 
     def login(self) -> None:
-        print("[login] Loading landing page...", flush=True)
         for attempt in range(3):
             try:
                 self.page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
@@ -384,21 +383,17 @@ class CPDBooker:
                 if attempt == 2:
                     raise
                 self.page.wait_for_timeout(3000)
-        print("[login] Landing page loaded. Checking login state...", flush=True)
         if self._is_logged_in():
-            print("[login] Already logged in. Reloading reservation page...", flush=True)
             try:
                 self.page.goto(self.url, wait_until="domcontentloaded", timeout=30000)
             except Exception:
                 pass
             self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
-            print("[login] Done (was already logged in).", flush=True)
+            print("Login complete (session reused).", flush=True)
             return
-        print("[login] Not logged in. Dismissing modal...", flush=True)
         self._dismiss_modal()
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
-        print("[login] Clicking Sign In...", flush=True)
         sign_in.click(timeout=8000, no_wait_after=True)
         try:
             self.page.wait_for_url("**/signin**", timeout=30000)
@@ -406,7 +401,6 @@ class CPDBooker:
         except Exception:
             pass
         self.page.wait_for_timeout(1000)
-        print("[login] On signin page. Filling credentials...", flush=True)
         email_selector = (
             "input[placeholder*='Email' i], input[aria-label*='Email' i], "
             "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"
@@ -426,26 +420,23 @@ class CPDBooker:
             ],
             self.password,
         )
-        print("[login] Submitting credentials...", flush=True)
         self._click_any(
             [
                 ("role_button", r"sign in|log in"),
                 ("css", "button[type='submit'], input[type='submit']"),
             ]
         )
-        print("[login] Waiting for post-login page settle (up to 15s)...", flush=True)
         try:
             self.page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
         self.page.wait_for_timeout(int(random.uniform(2000, 4000)))
-        print("[login] Navigating back to reservation page...", flush=True)
         try:
             self.page.goto(self.url, wait_until="domcontentloaded", timeout=30000)
         except Exception:
             pass
         self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
-        print("[login] Login complete.", flush=True)
+        print("Login complete.", flush=True)
 
     def _dismiss_modal(self) -> None:
         """Force-remove any blocking modal overlay via JS."""
@@ -495,11 +486,9 @@ class CPDBooker:
     def open_target_day(self, target_date: datetime) -> None:
         # The date picker is a custom combobox (inputmode="none") — fill() is ignored.
         # Must click to open the calendar popup, navigate months, then click the target day.
-        print(f"[open_target_day] Opening {target_date.strftime('%Y-%m-%d')}...", flush=True)
         self._dismiss_modal()
         date_input = self.page.get_by_label("Date picker, current date")
         date_input.click(timeout=10000)
-        print("[open_target_day] Calendar opened.", flush=True)
         self.page.locator(".an-calendar").wait_for(timeout=5000)
 
         target_month = target_date.strftime("%B %Y")  # e.g. "May 2026"
@@ -512,7 +501,6 @@ class CPDBooker:
             self.page.locator(arrow).click()
             self.page.wait_for_timeout(400)
 
-        print(f"[open_target_day] Clicking day {target_date.day}...", flush=True)
         day_str = str(target_date.day)
         day_cells = self.page.locator(".an-calendar-day:not(.an-calendar-day-othermonth)")
         count = day_cells.count()
@@ -522,13 +510,11 @@ class CPDBooker:
                 cell.click()
                 break
 
-        print("[open_target_day] Waiting for grid to settle...", flush=True)
         try:
             self.page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
         self.page.wait_for_timeout(3000)
-        print("[open_target_day] Done.", flush=True)
 
     def scrape_slots(self, target_date: datetime, day_label: str) -> List[Slot]:
         extracted = self.page.evaluate(
