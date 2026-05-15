@@ -90,24 +90,29 @@ def preferred_hours_display() -> str:
     return f"{start_l}–{end_l}"
 
 
-def _dry_run_poll_minutes() -> int:
+def _dry_run_poll_seconds() -> int:
+    if os.getenv("DRY_RUN_POLL_SECONDS"):
+        try:
+            return max(5, int(os.getenv("DRY_RUN_POLL_SECONDS")))
+        except ValueError:
+            pass
     raw = (os.getenv("DRY_RUN_POLL_MINUTES") or "30").strip()
     try:
-        return max(1, int(raw))
+        return max(1, int(raw)) * 60
     except ValueError:
-        return 30
+        return 30 * 60
 
 
 def dry_run_poll_deadline_ct(now_ct: datetime) -> datetime:
     """End of polling window for dry-run (any day / any clock time)."""
-    return now_ct + timedelta(minutes=_dry_run_poll_minutes())
+    return now_ct + timedelta(seconds=_dry_run_poll_seconds())
 
 
 def booking_search_window_description() -> str:
-    """Text for emails; dry-run uses DRY_RUN_POLL_MINUTES, prod uses 7:00–7:10 CT."""
+    """Text for emails; dry-run uses DRY_RUN_POLL_SECONDS/MINUTES, prod uses 7:00–7:10 CT."""
     if is_dry_run_enabled():
-        mins = _dry_run_poll_minutes()
-        return f"a dry-run polling window of up to {mins} minutes from run start"
+        secs = _dry_run_poll_seconds()
+        return f"a dry-run polling window of up to {secs} seconds from run start"
     return "7:00–7:10 AM CT"
 
 
