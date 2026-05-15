@@ -340,6 +340,7 @@ class CPDBooker:
             return True
 
     def login(self) -> None:
+        print("[login] Loading landing page...", flush=True)
         for attempt in range(3):
             try:
                 self.page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
@@ -348,28 +349,29 @@ class CPDBooker:
                 if attempt == 2:
                     raise
                 self.page.wait_for_timeout(3000)
+        print("[login] Landing page loaded. Checking login state...", flush=True)
         if self._is_logged_in():
-            # Already authenticated — just reload the reservation page
+            print("[login] Already logged in. Reloading reservation page...", flush=True)
             try:
-                self.page.goto(self.url, wait_until="networkidle", timeout=60000)
+                self.page.goto(self.url, wait_until="domcontentloaded", timeout=30000)
             except Exception:
-                self.page.goto(self.url, wait_until="load", timeout=60000)
+                pass
             self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
+            print("[login] Done (was already logged in).", flush=True)
             return
-        # Dismiss any error modal that may block the Sign In link
+        print("[login] Not logged in. Dismissing modal...", flush=True)
         self._dismiss_modal()
-        # Wait for Sign In to be stable before clicking
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
+        print("[login] Clicking Sign In...", flush=True)
         sign_in.click(timeout=8000, no_wait_after=True)
-        # Wait for the signin page to load (no_wait_after skips Playwright's built-in nav wait)
         try:
             self.page.wait_for_url("**/signin**", timeout=30000)
             self.page.wait_for_load_state("domcontentloaded", timeout=30000)
         except Exception:
             pass
         self.page.wait_for_timeout(1000)
-        # Wait for the email input to be visible before filling.
+        print("[login] On signin page. Filling credentials...", flush=True)
         email_selector = (
             "input[placeholder*='Email' i], input[aria-label*='Email' i], "
             "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"
@@ -389,24 +391,26 @@ class CPDBooker:
             ],
             self.password,
         )
+        print("[login] Submitting credentials...", flush=True)
         self._click_any(
             [
                 ("role_button", r"sign in|log in"),
                 ("css", "button[type='submit'], input[type='submit']"),
             ]
         )
+        print("[login] Waiting for post-login page settle (up to 15s)...", flush=True)
         try:
-            self.page.wait_for_load_state("networkidle", timeout=60000)
+            self.page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
-        # Brief pause after login before navigating — helps reCAPTCHA scoring
         self.page.wait_for_timeout(int(random.uniform(2000, 4000)))
-        # Re-open quick reservation page after account redirect so we stay on the reservation grid.
+        print("[login] Navigating back to reservation page...", flush=True)
         try:
-            self.page.goto(self.url, wait_until="networkidle", timeout=60000)
+            self.page.goto(self.url, wait_until="domcontentloaded", timeout=30000)
         except Exception:
-            self.page.goto(self.url, wait_until="load", timeout=60000)
+            pass
         self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
+        print("[login] Login complete.", flush=True)
 
     def _dismiss_modal(self) -> None:
         """Force-remove any blocking modal overlay via JS."""
