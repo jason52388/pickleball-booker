@@ -592,7 +592,7 @@ class CPDBooker:
         self.page.wait_for_timeout(int(random.uniform(lo, hi) * 1000))
 
     def book_slot(self, slot: Slot) -> bool:
-        if is_dry_run_enabled():
+        if is_dry_run_enabled() and not is_preview_mode():
             return True
         try:
             row = self.page.locator("tr").nth(slot.row_index)
