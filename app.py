@@ -515,7 +515,10 @@ class CPDBooker:
                 cell.click()
                 break
 
-        self.page.wait_for_load_state("networkidle")
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
         # The availability grid re-renders asynchronously after networkidle fires.
         # A fixed buffer is needed because cells update in-place after the network is idle.
         self.page.wait_for_timeout(3000)
@@ -673,7 +676,10 @@ class CPDBooker:
                     cvv_input.fill(cvv, timeout=5000)
                     # Pay button is on the main page (Order Summary sidebar)
                     self._click_any([("role_button", r"^pay$"), ("css", "button[class*='pay']")])
-                    self.page.wait_for_load_state("networkidle")
+                    try:
+                        self.page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
                     self.page.wait_for_timeout(2000)
                 except Exception:
                     pass
