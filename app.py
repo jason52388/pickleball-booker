@@ -667,23 +667,22 @@ class CPDBooker:
                 except Exception:
                     pass
 
+                # CVV + Pay are required to complete the booking — let any failure
+                # bubble up so we don't report a successful booking that didn't happen.
+                # The networkidle wait stays inside its own try/except because a slow
+                # idle-check shouldn't void a payment that already went through.
+                payment_frame = self.page.frame_locator("iframe[src*='checkoutcui.active.com']")
+                cvv_input = payment_frame.locator("input[id*='cvv']")
+                cvv_input.fill(cvv, timeout=5000)
+                self._click_any([("role_button", r"^pay$"), ("css", "button[class*='pay']")])
                 try:
-                    # CVV lives inside a cross-origin payment iframe
-                    payment_frame = self.page.frame_locator("iframe[src*='checkoutcui.active.com']")
-                    cvv_input = payment_frame.locator("input[id*='cvv']")
-                    cvv_input.fill(cvv, timeout=5000)
-                    # Pay button is on the main page (Order Summary sidebar)
-                    self._click_any([("role_button", r"^pay$"), ("css", "button[class*='pay']")])
-                    try:
-                        self.page.wait_for_load_state("networkidle", timeout=15000)
-                    except Exception:
-                        pass
-                    self.page.wait_for_timeout(2000)
+                    self.page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
+                self.page.wait_for_timeout(2000)
 
             return True
-        except (PlaywrightTimeoutError, RuntimeError, Exception):
+        except Exception:
             return False
 
 
