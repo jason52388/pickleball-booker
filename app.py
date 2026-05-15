@@ -90,24 +90,29 @@ def preferred_hours_display() -> str:
     return f"{start_l}–{end_l}"
 
 
-def _dry_run_poll_minutes() -> int:
+def _dry_run_poll_seconds() -> int:
+    if os.getenv("DRY_RUN_POLL_SECONDS"):
+        try:
+            return max(5, int(os.getenv("DRY_RUN_POLL_SECONDS")))
+        except ValueError:
+            pass
     raw = (os.getenv("DRY_RUN_POLL_MINUTES") or "30").strip()
     try:
-        return max(1, int(raw))
+        return max(1, int(raw)) * 60
     except ValueError:
-        return 30
+        return 30 * 60
 
 
 def dry_run_poll_deadline_ct(now_ct: datetime) -> datetime:
     """End of polling window for dry-run (any day / any clock time)."""
-    return now_ct + timedelta(minutes=_dry_run_poll_minutes())
+    return now_ct + timedelta(seconds=_dry_run_poll_seconds())
 
 
 def booking_search_window_description() -> str:
-    """Text for emails; dry-run uses DRY_RUN_POLL_MINUTES, prod uses 7:00–7:10 CT."""
+    """Text for emails; dry-run uses DRY_RUN_POLL_SECONDS/MINUTES, prod uses 7:00–7:10 CT."""
     if is_dry_run_enabled():
-        mins = _dry_run_poll_minutes()
-        return f"a dry-run polling window of up to {mins} minutes from run start"
+        secs = _dry_run_poll_seconds()
+        return f"a dry-run polling window of up to {secs} seconds from run start"
     return "7:00–7:10 AM CT"
 
 
@@ -270,6 +275,15 @@ def is_dry_run_enabled() -> bool:
     return os.getenv("DRY_RUN", "false").lower() == "true"
 
 
+def is_preview_mode() -> bool:
+    return os.getenv("PREVIEW_STOP_BEFORE_PAY", "false").lower() == "true"
+
+
+def is_test_run() -> bool:
+    """True for any run that should not send emails or write booking locks."""
+    return is_dry_run_enabled() or is_preview_mode()
+
+
 def is_weekend_lock_enabled() -> bool:
     return os.getenv("BOOKING_LOCK_ENABLED", "true").lower() == "true"
 
@@ -370,7 +384,6 @@ class CPDBooker:
             return True
 
     def login(self) -> None:
-        print("[login] Loading landing page...", flush=True)
         for attempt in range(3):
             try:
                 self.page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
@@ -379,21 +392,17 @@ class CPDBooker:
                 if attempt == 2:
                     raise
                 self.page.wait_for_timeout(3000)
-        print("[login] Landing page loaded. Checking login state...", flush=True)
         if self._is_logged_in():
-            print("[login] Already logged in. Reloading reservation page...", flush=True)
             try:
                 self.page.goto(self.url, wait_until="domcontentloaded", timeout=30000)
             except Exception:
                 pass
             self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
-            print("[login] Done (was already logged in).", flush=True)
+            print("Login complete (session reused).", flush=True)
             return
-        print("[login] Not logged in. Dismissing modal...", flush=True)
         self._dismiss_modal()
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
-        print("[login] Clicking Sign In...", flush=True)
         sign_in.click(timeout=8000, no_wait_after=True)
         try:
             self.page.wait_for_url("**/signin**", timeout=30000)
@@ -401,7 +410,6 @@ class CPDBooker:
         except Exception:
             pass
         self.page.wait_for_timeout(1000)
-        print("[login] On signin page. Filling credentials...", flush=True)
         email_selector = (
             "input[placeholder*='Email' i], input[aria-label*='Email' i], "
             "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"
@@ -421,26 +429,23 @@ class CPDBooker:
             ],
             self.password,
         )
-        print("[login] Submitting credentials...", flush=True)
         self._click_any(
             [
                 ("role_button", r"sign in|log in"),
                 ("css", "button[type='submit'], input[type='submit']"),
             ]
         )
-        print("[login] Waiting for post-login page settle (up to 15s)...", flush=True)
         try:
             self.page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
         self.page.wait_for_timeout(int(random.uniform(2000, 4000)))
-        print("[login] Navigating back to reservation page...", flush=True)
         try:
             self.page.goto(self.url, wait_until="domcontentloaded", timeout=30000)
         except Exception:
             pass
         self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
-        print("[login] Login complete.", flush=True)
+        print("Login complete.", flush=True)
 
     def _dismiss_modal(self) -> None:
         """Force-remove any blocking modal overlay via JS."""
@@ -505,7 +510,6 @@ class CPDBooker:
             self.page.locator(arrow).click()
             self.page.wait_for_timeout(400)
 
-        # Click the day number, skipping cells from adjacent months
         day_str = str(target_date.day)
         day_cells = self.page.locator(".an-calendar-day:not(.an-calendar-day-othermonth)")
         count = day_cells.count()
@@ -515,9 +519,10 @@ class CPDBooker:
                 cell.click()
                 break
 
-        self.page.wait_for_load_state("networkidle")
-        # The availability grid re-renders asynchronously after networkidle fires.
-        # A fixed buffer is needed because cells update in-place after the network is idle.
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
         self.page.wait_for_timeout(3000)
 
     def scrape_slots(self, target_date: datetime, day_label: str) -> List[Slot]:
@@ -587,7 +592,7 @@ class CPDBooker:
         self.page.wait_for_timeout(int(random.uniform(lo, hi) * 1000))
 
     def book_slot(self, slot: Slot) -> bool:
-        if is_dry_run_enabled():
+        if is_dry_run_enabled() and not is_preview_mode():
             return True
         try:
             row = self.page.locator("tr").nth(slot.row_index)
@@ -603,7 +608,6 @@ class CPDBooker:
                 name_input = self.page.get_by_label(re.compile("event name", re.I)).first
                 name_input.click(timeout=10000)
                 self._human_pause(0.3, 0.7)
-                # Type character by character like a human
                 for ch in event_name:
                     name_input.type(ch, delay=random.randint(60, 160))
             except Exception:
@@ -611,7 +615,6 @@ class CPDBooker:
 
             self._human_pause(0.8, 1.8)
 
-            # Click "Confirm bookings" — must match "confirm" to avoid "Clear all bookings"
             self._click_any(
                 [
                     ("role_button", r"confirm bookings?"),
@@ -620,7 +623,6 @@ class CPDBooker:
             )
             self._human_pause(2.0, 4.0)
 
-            # Handle disclaimers dialog if it appears
             try:
                 checkbox = self.page.locator("input[type='checkbox']").first
                 checkbox.wait_for(timeout=4000)
@@ -633,7 +635,6 @@ class CPDBooker:
             except Exception:
                 pass
 
-            # Final step: click Reserve to commit the booking
             self._human_pause(1.0, 2.0)
             self._click_any(
                 [
@@ -642,7 +643,7 @@ class CPDBooker:
                 ]
             )
             try:
-                self.page.wait_for_load_state("networkidle", timeout=60000)
+                self.page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
             self._human_pause(2.0, 4.0)
@@ -673,7 +674,10 @@ class CPDBooker:
                     cvv_input.fill(cvv, timeout=5000)
                     # Pay button is on the main page (Order Summary sidebar)
                     self._click_any([("role_button", r"^pay$"), ("css", "button[class*='pay']")])
-                    self.page.wait_for_load_state("networkidle")
+                    try:
+                        self.page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass
                     self.page.wait_for_timeout(2000)
                 except Exception:
                     pass
@@ -838,8 +842,8 @@ def main() -> None:
     # Sunday=6 days before Saturday, Monday=5 days before Saturday.
     # In dry-run mode always notify so testing works any day (prod only emails Su/Mo).
     send_no_avail_notification = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
-    if is_dry_run_enabled():
-        # Dry-run: poll for DRY_RUN_POLL_MINUTES so VPS/GitHub-triggered runs work any day/time.
+    if is_test_run():
+        # Test runs (dry-run or preview) use a rolling window so they work any time of day.
         deadline_ct = dry_run_poll_deadline_ct(now_ct)
     else:
         deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
@@ -855,12 +859,17 @@ def main() -> None:
     with CPDBooker() as booker:
         booker.login()
 
+        # Reset deadline after login so the polling window starts when scraping can actually begin.
+        if is_test_run():
+            deadline_ct = dry_run_poll_deadline_ct(datetime.now(chicago))
+
         while datetime.now(chicago) < deadline_ct:
             booker.open_target_day(saturday)
             saturday_slots = booker.scrape_slots(saturday, "Saturday")
             booker.open_target_day(sunday)
             sunday_slots = booker.scrape_slots(sunday, "Sunday")
             last_all_slots = sorted(saturday_slots + sunday_slots, key=lambda s: s.start)
+            print(f"[main] Found {len(saturday_slots)} Saturday slots, {len(sunday_slots)} Sunday slots ({len(last_all_slots)} total).", flush=True)
 
             picked_auto = choose_auto_book_slot(saturday_slots, sunday_slots)
             if picked_auto:
@@ -878,7 +887,8 @@ def main() -> None:
             time.sleep(5)
 
     if not booked and send_no_avail_notification:
-        send_no_availability_email(saturday, sunday)
+        if not is_test_run():
+            send_no_availability_email(saturday, sunday)
         if not last_all_slots:
             send_telegram(
                 f"No pickleball slots found at all for "
