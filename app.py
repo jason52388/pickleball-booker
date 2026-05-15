@@ -868,6 +868,10 @@ def main() -> None:
     with CPDBooker() as booker:
         booker.login()
 
+        # Reset deadline after login so the polling window starts when scraping can actually begin.
+        if is_dry_run_enabled():
+            deadline_ct = dry_run_poll_deadline_ct(datetime.now(chicago))
+
         while datetime.now(chicago) < deadline_ct:
             booker.open_target_day(saturday)
             saturday_slots = booker.scrape_slots(saturday, "Saturday")
