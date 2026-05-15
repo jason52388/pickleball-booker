@@ -275,6 +275,15 @@ def is_dry_run_enabled() -> bool:
     return os.getenv("DRY_RUN", "false").lower() == "true"
 
 
+def is_preview_mode() -> bool:
+    return os.getenv("PREVIEW_STOP_BEFORE_PAY", "false").lower() == "true"
+
+
+def is_test_run() -> bool:
+    """True for any run that should not send emails or write booking locks."""
+    return is_dry_run_enabled() or is_preview_mode()
+
+
 def is_weekend_lock_enabled() -> bool:
     return os.getenv("BOOKING_LOCK_ENABLED", "true").lower() == "true"
 
@@ -837,8 +846,8 @@ def main() -> None:
     # Sunday=6 days before Saturday, Monday=5 days before Saturday.
     # In dry-run mode always notify so testing works any day (prod only emails Su/Mo).
     send_no_avail_notification = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
-    if is_dry_run_enabled():
-        # Dry-run: poll for DRY_RUN_POLL_MINUTES so VPS/GitHub-triggered runs work any day/time.
+    if is_test_run():
+        # Test runs (dry-run or preview) use a rolling window so they work any time of day.
         deadline_ct = dry_run_poll_deadline_ct(now_ct)
     else:
         deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
@@ -855,7 +864,7 @@ def main() -> None:
         booker.login()
 
         # Reset deadline after login so the polling window starts when scraping can actually begin.
-        if is_dry_run_enabled():
+        if is_test_run():
             deadline_ct = dry_run_poll_deadline_ct(datetime.now(chicago))
 
         while datetime.now(chicago) < deadline_ct:
@@ -882,7 +891,8 @@ def main() -> None:
             time.sleep(5)
 
     if not booked and send_no_avail_notification:
-        send_no_availability_email(saturday, sunday)
+        if not is_test_run():
+            send_no_availability_email(saturday, sunday)
         if not last_all_slots:
             send_telegram(
                 f"No pickleball slots found at all for "
