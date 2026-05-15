@@ -81,6 +81,36 @@ def is_preferred_time(slot: Slot) -> bool:
     return start_hour <= slot.start.hour <= end_hour
 
 
+def preferred_hours_display() -> str:
+    """Human-readable preferred window (mirrors is_preferred_time / env)."""
+    start_hour = int(os.getenv("PREFERRED_START_HOUR", "8"))
+    end_hour = int(os.getenv("PREFERRED_END_HOUR", "11"))
+    start_l = datetime(2000, 1, 1, start_hour).strftime("%-I:%M %p")
+    end_l = datetime(2000, 1, 1, end_hour).strftime("%-I:%M %p")
+    return f"{start_l}–{end_l}"
+
+
+def _dry_run_poll_minutes() -> int:
+    raw = (os.getenv("DRY_RUN_POLL_MINUTES") or "30").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 30
+
+
+def dry_run_poll_deadline_ct(now_ct: datetime) -> datetime:
+    """End of polling window for dry-run (any day / any clock time)."""
+    return now_ct + timedelta(minutes=_dry_run_poll_minutes())
+
+
+def booking_search_window_description() -> str:
+    """Text for emails; dry-run uses DRY_RUN_POLL_MINUTES, prod uses 7:00–7:10 CT."""
+    if is_dry_run_enabled():
+        mins = _dry_run_poll_minutes()
+        return f"a dry-run polling window of up to {mins} minutes from run start"
+    return "7:00–7:10 AM CT"
+
+
 def _telegram_api(method: str, payload: dict) -> dict:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     if not token:
@@ -340,6 +370,7 @@ class CPDBooker:
             return True
 
     def login(self) -> None:
+        print("[login] Loading landing page...", flush=True)
         for attempt in range(3):
             try:
                 self.page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
@@ -348,28 +379,29 @@ class CPDBooker:
                 if attempt == 2:
                     raise
                 self.page.wait_for_timeout(3000)
+        print("[login] Landing page loaded. Checking login state...", flush=True)
         if self._is_logged_in():
-            # Already authenticated — just reload the reservation page
+            print("[login] Already logged in. Reloading reservation page...", flush=True)
             try:
-                self.page.goto(self.url, wait_until="networkidle", timeout=60000)
+                self.page.goto(self.url, wait_until="domcontentloaded", timeout=30000)
             except Exception:
-                self.page.goto(self.url, wait_until="load", timeout=60000)
+                pass
             self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
+            print("[login] Done (was already logged in).", flush=True)
             return
-        # Dismiss any error modal that may block the Sign In link
+        print("[login] Not logged in. Dismissing modal...", flush=True)
         self._dismiss_modal()
-        # Wait for Sign In to be stable before clicking
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
+        print("[login] Clicking Sign In...", flush=True)
         sign_in.click(timeout=8000, no_wait_after=True)
-        # Wait for the signin page to load (no_wait_after skips Playwright's built-in nav wait)
         try:
             self.page.wait_for_url("**/signin**", timeout=30000)
             self.page.wait_for_load_state("domcontentloaded", timeout=30000)
         except Exception:
             pass
         self.page.wait_for_timeout(1000)
-        # Wait for the email input to be visible before filling.
+        print("[login] On signin page. Filling credentials...", flush=True)
         email_selector = (
             "input[placeholder*='Email' i], input[aria-label*='Email' i], "
             "input[type='email'], input[name*='user'], input[id*='user'], input[id*='email']"
@@ -389,24 +421,26 @@ class CPDBooker:
             ],
             self.password,
         )
+        print("[login] Submitting credentials...", flush=True)
         self._click_any(
             [
                 ("role_button", r"sign in|log in"),
                 ("css", "button[type='submit'], input[type='submit']"),
             ]
         )
+        print("[login] Waiting for post-login page settle (up to 15s)...", flush=True)
         try:
-            self.page.wait_for_load_state("networkidle", timeout=60000)
+            self.page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
-        # Brief pause after login before navigating — helps reCAPTCHA scoring
         self.page.wait_for_timeout(int(random.uniform(2000, 4000)))
-        # Re-open quick reservation page after account redirect so we stay on the reservation grid.
+        print("[login] Navigating back to reservation page...", flush=True)
         try:
-            self.page.goto(self.url, wait_until="networkidle", timeout=60000)
+            self.page.goto(self.url, wait_until="domcontentloaded", timeout=30000)
         except Exception:
-            self.page.goto(self.url, wait_until="load", timeout=60000)
+            pass
         self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
+        print("[login] Login complete.", flush=True)
 
     def _dismiss_modal(self) -> None:
         """Force-remove any blocking modal overlay via JS."""
@@ -773,9 +807,11 @@ def send_no_availability_email(saturday: datetime, sunday: datetime) -> None:
     subject = (
         f"No pickleball slots found — weekend of {saturday.strftime('%B %-d')}"
     )
+    pref = preferred_hours_display()
+    window = booking_search_window_description()
     body = (
-        f"The pickleball booker checked from 7:00–7:10 AM CT and found no preferred "
-        f"(8–11 AM) slots available at McFetridge for the weekend of "
+        f"The pickleball booker checked during {window} and found no preferred "
+        f"({pref}) slots available at McFetridge for the weekend of "
         f"{saturday.strftime('%A, %B %-d')} – {sunday.strftime('%A, %B %-d, %Y')}.\n\n"
         f"You may want to check manually at:\n"
         f"https://anc.apm.activecommunities.com/chicagoparkdistrict/reservation/landing/quick?groupId=2\n"
@@ -800,11 +836,11 @@ def main() -> None:
     chicago = ZoneInfo("America/Chicago")
     now_ct = datetime.now(chicago)
     # Sunday=6 days before Saturday, Monday=5 days before Saturday.
-    # In dry-run mode always send so testing works any day of the week.
+    # In dry-run mode always notify so testing works any day (prod only emails Su/Mo).
     send_no_avail_notification = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
     if is_dry_run_enabled():
-        # In dry-run mode allow a 5-minute window from now so testing works any time of day.
-        deadline_ct = now_ct + timedelta(minutes=5)
+        # Dry-run: poll for DRY_RUN_POLL_MINUTES so VPS/GitHub-triggered runs work any day/time.
+        deadline_ct = dry_run_poll_deadline_ct(now_ct)
     else:
         deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
 
@@ -850,7 +886,10 @@ def main() -> None:
             )
         else:
             save_pending_choice(run_id, saturday, sunday, last_all_slots)
-            send_slot_options(last_all_slots, "No 8–11 AM slot found. Tap a number to book a fallback, or N to skip:")
+            send_slot_options(
+                last_all_slots,
+                f"No preferred {preferred_hours_display()} slot found. Tap a number to book a fallback, or N to skip:",
+            )
 
 
 if __name__ == "__main__":
