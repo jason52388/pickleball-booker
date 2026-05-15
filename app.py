@@ -595,6 +595,7 @@ class CPDBooker:
         if is_dry_run_enabled() and not is_preview_mode():
             return True
         try:
+            print(f"[book_slot] Clicking cell row={slot.row_index} col={slot.col_index}...", flush=True)
             row = self.page.locator("tr").nth(slot.row_index)
             cell = row.locator("td.td-grid-cell, td.grid-cell").nth(slot.col_index)
             cell.scroll_into_view_if_needed(timeout=2500)
@@ -604,11 +605,11 @@ class CPDBooker:
 
             # Fill in the required Event name field before confirming
             event_name = os.getenv("BOOKING_EVENT_NAME", "Pickleball")
+            print("[book_slot] Filling event name...", flush=True)
             try:
                 name_input = self.page.get_by_label(re.compile("event name", re.I)).first
                 name_input.click(timeout=10000)
                 self._human_pause(0.3, 0.7)
-                # Type character by character like a human
                 for ch in event_name:
                     name_input.type(ch, delay=random.randint(60, 160))
             except Exception:
@@ -616,7 +617,7 @@ class CPDBooker:
 
             self._human_pause(0.8, 1.8)
 
-            # Click "Confirm bookings" — must match "confirm" to avoid "Clear all bookings"
+            print("[book_slot] Clicking Confirm bookings...", flush=True)
             self._click_any(
                 [
                     ("role_button", r"confirm bookings?"),
@@ -625,7 +626,7 @@ class CPDBooker:
             )
             self._human_pause(2.0, 4.0)
 
-            # Handle disclaimers dialog if it appears
+            print("[book_slot] Handling disclaimers...", flush=True)
             try:
                 checkbox = self.page.locator("input[type='checkbox']").first
                 checkbox.wait_for(timeout=4000)
@@ -638,7 +639,7 @@ class CPDBooker:
             except Exception:
                 pass
 
-            # Final step: click Reserve to commit the booking
+            print("[book_slot] Clicking Reserve...", flush=True)
             self._human_pause(1.0, 2.0)
             self._click_any(
                 [
@@ -646,17 +647,20 @@ class CPDBooker:
                     ("css", "button.booking-detail__btn--continue"),
                 ]
             )
+            print("[book_slot] Waiting for payment page...", flush=True)
             try:
-                self.page.wait_for_load_state("networkidle", timeout=60000)
+                self.page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
             self._human_pause(2.0, 4.0)
 
             # Preview mode: screenshot the payment page and send to Telegram, then stop
             if os.getenv("PREVIEW_STOP_BEFORE_PAY", "false").lower() == "true":
+                print("[book_slot] Taking screenshot...", flush=True)
                 screenshot_path = str(DATA_DIR / "preview_payment.png")
                 self.page.screenshot(path=screenshot_path, full_page=True)
                 send_telegram_photo(screenshot_path, "Reached payment page — not paying (preview mode)")
+                print("[book_slot] Screenshot sent to Telegram.", flush=True)
                 return True
 
             # Checkout page — accept any waiver checkbox, fill CVV inside the payment iframe, then pay
