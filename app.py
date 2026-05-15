@@ -869,6 +869,7 @@ def main() -> None:
             booker.open_target_day(sunday)
             sunday_slots = booker.scrape_slots(sunday, "Sunday")
             last_all_slots = sorted(saturday_slots + sunday_slots, key=lambda s: s.start)
+            print(f"[main] Found {len(saturday_slots)} Saturday slots, {len(sunday_slots)} Sunday slots ({len(last_all_slots)} total).", flush=True)
 
             picked_auto = choose_auto_book_slot(saturday_slots, sunday_slots)
             if picked_auto:
