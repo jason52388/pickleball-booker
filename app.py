@@ -388,16 +388,16 @@ class CPDBooker:
             pass
 
     def captcha_visible(self) -> bool:
-        """Return True if a reCAPTCHA / hCaptcha / Turnstile / 'verify you are
-        human' interstitial is currently blocking the page."""
+        """Return True only if an *actual* captcha challenge is blocking the page.
+
+        reCAPTCHA v3 ships a floating badge iframe (api2/anchor) on every protected
+        page — that is not a challenge. The challenge popup uses api2/bframe.
+        Matching plain `recaptcha` here would false-positive on the badge.
+        """
         selectors = [
-            'iframe[src*="recaptcha"]',
-            'iframe[src*="hcaptcha"]',
+            'iframe[src*="recaptcha/api2/bframe"]',
+            'iframe[src*="hcaptcha.com"][src*="challenge"]',
             'iframe[src*="turnstile"]',
-            'iframe[title*="captcha" i]',
-            'iframe[title*="challenge" i]',
-            '[id*="captcha" i]:not([id*="captcha-error" i])',
-            '[class*="captcha" i]',
             'div:has-text("Verify you are human")',
             'div:has-text("I\'m not a robot")',
         ]
