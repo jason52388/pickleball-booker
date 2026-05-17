@@ -764,9 +764,14 @@ class CPDBooker:
                 # idle-check shouldn't void a payment that already went through.
                 step = "fill CVV"
                 print(f"[book_slot] {step}", flush=True)
+                # The payment iframe loads from a third-party host (Active.com
+                # checkout) and frequently takes >5s on first navigation. Wait
+                # for the iframe element on the main page before reaching into it.
+                self.page.locator("iframe[src*='checkoutcui.active.com']").wait_for(timeout=30000)
                 payment_frame = self.page.frame_locator("iframe[src*='checkoutcui.active.com']")
                 cvv_input = payment_frame.locator("input[id*='cvv']")
-                cvv_input.fill(cvv, timeout=5000)
+                cvv_input.wait_for(state="visible", timeout=20000)
+                cvv_input.fill(cvv, timeout=10000)
                 self._debug_capture(idx, "after_cvv"); idx += 1
                 step = "click Pay"
                 print(f"[book_slot] {step}", flush=True)
