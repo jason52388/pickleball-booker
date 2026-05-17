@@ -388,25 +388,48 @@ class CPDBooker:
             pass
 
     def captcha_visible(self) -> bool:
-        """Return True if a reCAPTCHA / hCaptcha / Turnstile / 'verify you are
-        human' interstitial is currently blocking the page."""
-        selectors = [
-            'iframe[src*="recaptcha"]',
-            'iframe[src*="hcaptcha"]',
-            'iframe[src*="turnstile"]',
-            'iframe[title*="captcha" i]',
-            'iframe[title*="challenge" i]',
-            '[id*="captcha" i]:not([id*="captcha-error" i])',
-            '[class*="captcha" i]',
-            'div:has-text("Verify you are human")',
-            'div:has-text("I\'m not a robot")',
+        """Return True if a real captcha interstitial is currently blocking the page."""
+        try:
+            url = self.page.url
+            title = self.page.title()
+        except Exception:
+            url, title = "", ""
+
+        print(f"[captcha_check] url={url} title={title!r}", flush=True)
+
+        # Cloudflare / CDN interstitials — detectable by page title or URL before
+        # any DOM selector is needed.
+        if any(k in title.lower() for k in ("just a moment", "attention required", "access denied", "security check")):
+            print(f"[captcha_check] hit: title={title!r}", flush=True)
+            return True
+        if any(k in url for k in ("/cdn-cgi/challenge", "/captcha", "challenge-platform")):
+            print(f"[captcha_check] hit: url={url}", flush=True)
+            return True
+
+        # Visible captcha iframes — only match iframes that are actually on-screen.
+        iframe_selectors = [
+            'iframe[src*="recaptcha"][src*="anchor"]',
+            'iframe[src*="hcaptcha.com"]',
+            'iframe[src*="challenges.cloudflare.com"]',
+            'iframe[src*="turnstile"][src*="api"]',
         ]
-        for sel in selectors:
+        for sel in iframe_selectors:
             try:
                 if self.page.locator(sel).first.is_visible(timeout=500):
+                    print(f"[captcha_check] hit: selector={sel}", flush=True)
                     return True
             except Exception:
                 continue
+
+        # Visible "verify you are human" text blocks.
+        for text in ("Verify you are human", "I'm not a robot", "Verifying you are human"):
+            try:
+                if self.page.get_by_text(text, exact=True).first.is_visible(timeout=500):
+                    print(f"[captcha_check] hit: text={text!r}", flush=True)
+                    return True
+            except Exception:
+                continue
+
         return False
 
     def _is_logged_in(self) -> bool:
