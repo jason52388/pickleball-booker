@@ -135,17 +135,33 @@ def send_telegram_photo(photo_path: str, caption: str = "") -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
+        print(f"[telegram_photo] skipped — no token/chat_id configured", flush=True)
         return
     try:
+        size = os.path.getsize(photo_path)
+        print(f"[telegram_photo] sending {photo_path} ({size} bytes) caption='{caption[:60]}'", flush=True)
         with open(photo_path, "rb") as f:
-            http_requests.post(
+            r = http_requests.post(
                 f"https://api.telegram.org/bot{token}/sendPhoto",
                 data={"chat_id": chat_id, "caption": caption},
                 files={"photo": f},
                 timeout=30,
             )
-    except Exception:
-        pass
+        body = r.text[:400] if hasattr(r, "text") else ""
+        print(f"[telegram_photo] status={r.status_code} body={body}", flush=True)
+        # Telegram rejects photos >10MB or >10000px on a side. Fall back to a
+        # document upload so the failure case still gives us something to look at.
+        if r.status_code >= 400:
+            with open(photo_path, "rb") as f:
+                rd = http_requests.post(
+                    f"https://api.telegram.org/bot{token}/sendDocument",
+                    data={"chat_id": chat_id, "caption": caption},
+                    files={"document": f},
+                    timeout=60,
+                )
+            print(f"[telegram_photo] sendDocument fallback status={rd.status_code} body={rd.text[:400]}", flush=True)
+    except Exception as e:
+        print(f"[telegram_photo] EXCEPTION: {type(e).__name__}: {e}", flush=True)
 
 
 def send_telegram(message: str, buttons: Optional[List[str]] = None) -> None:
@@ -370,6 +386,28 @@ class CPDBooker:
             self.pw.stop()
         except Exception:
             pass
+
+    def captcha_visible(self) -> bool:
+        """Return True if a reCAPTCHA / hCaptcha / Turnstile / 'verify you are
+        human' interstitial is currently blocking the page."""
+        selectors = [
+            'iframe[src*="recaptcha"]',
+            'iframe[src*="hcaptcha"]',
+            'iframe[src*="turnstile"]',
+            'iframe[title*="captcha" i]',
+            'iframe[title*="challenge" i]',
+            '[id*="captcha" i]:not([id*="captcha-error" i])',
+            '[class*="captcha" i]',
+            'div:has-text("Verify you are human")',
+            'div:has-text("I\'m not a robot")',
+        ]
+        for sel in selectors:
+            try:
+                if self.page.locator(sel).first.is_visible(timeout=500):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _is_logged_in(self) -> bool:
         # Wait for JS to settle before checking — avoids false negatives from
@@ -901,6 +939,23 @@ def main() -> None:
 
     chicago = ZoneInfo("America/Chicago")
     now_ct = datetime.now(chicago)
+
+    def log(msg: str) -> None:
+        ts = datetime.now(chicago).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] [RUN {run_id}] {msg}", flush=True)
+
+    if is_dry_run_enabled():
+        mode = "dry-run"
+    elif is_preview_mode():
+        mode = "preview"
+    elif is_cron_mode():
+        mode = "cron"
+    else:
+        mode = "manual"
+
+    saturday, sunday = upcoming_weekend(now_ct)
+    log(f"start mode={mode} target={saturday.date()}/{sunday.date()}")
+
     # Sunday=6 days before Saturday, Monday=5 days before Saturday.
     # In dry-run mode always notify so testing works any day (prod only emails Su/Mo).
     send_no_avail_notification = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
@@ -913,52 +968,115 @@ def main() -> None:
         # On-demand manual run: 10-minute window starting now.
         deadline_ct = now_ct + timedelta(minutes=10)
 
-    saturday, sunday = upcoming_weekend(now_ct)
+    # Cron heartbeat: prove to the user the script actually fired this morning.
+    # Without this, a silent crash before scraping leaves zero trace in Telegram.
+    if is_cron_mode():
+        send_telegram(
+            f"⏰ Pickleball booker started [{run_id}] — weekend "
+            f"{saturday.strftime('%a %b %-d')}/{sunday.strftime('%a %b %-d')}"
+        )
 
     if has_weekend_booking_lock(saturday, sunday):
+        log("end status=skipped reason=weekend_already_booked")
+        if is_cron_mode():
+            send_telegram(f"⏭ Pickleball [{run_id}] skipped — weekend already booked.")
         return
 
+    status = "unknown"
+    reason = ""
     booked = False
     last_all_slots: List[Slot] = []
 
-    with CPDBooker() as booker:
-        booker.login()
+    try:
+        with CPDBooker() as booker:
+            log("opening browser + logging in")
+            booker.login()
+            log("login complete")
 
-        # Reset deadline after login so the polling window starts when scraping can actually begin.
-        if is_test_run():
-            deadline_ct = dry_run_poll_deadline_ct(datetime.now(chicago))
-        elif not is_cron_mode():
-            deadline_ct = datetime.now(chicago) + timedelta(minutes=10)
+            if booker.captcha_visible():
+                log("CAPTCHA detected after login")
+                captcha_shot = str(DATA_DIR / f"captcha_{run_id}.png")
+                try:
+                    booker.page.screenshot(path=captcha_shot, full_page=True)
+                except Exception as e:
+                    log(f"captcha screenshot failed: {e}")
+                send_telegram(
+                    f"⚠️ Captcha blocking pickleball booker [{run_id}] — "
+                    f"log into the VPS browser profile and solve it manually."
+                )
+                send_telegram_photo(captcha_shot, f"Captcha on run [{run_id}]")
+                status = "captcha"
+                reason = "captcha_after_login"
+                return
 
-        while datetime.now(chicago) < deadline_ct:
-            booker.open_target_day(saturday)
-            saturday_slots = booker.scrape_slots(saturday, "Saturday")
-            booker.open_target_day(sunday)
-            sunday_slots = booker.scrape_slots(sunday, "Sunday")
-            last_all_slots = sorted(saturday_slots + sunday_slots, key=lambda s: s.start)
-            print(f"[main] Found {len(saturday_slots)} Saturday slots, {len(sunday_slots)} Sunday slots ({len(last_all_slots)} total).", flush=True)
+            # Reset deadline after login so the polling window starts when scraping can actually begin.
+            if is_test_run():
+                deadline_ct = dry_run_poll_deadline_ct(datetime.now(chicago))
+            elif not is_cron_mode():
+                deadline_ct = datetime.now(chicago) + timedelta(minutes=10)
 
-            picked_auto = choose_auto_book_slot(saturday_slots, sunday_slots)
-            if picked_auto:
-                target_date = saturday if picked_auto.day_label == "Saturday" else sunday
-                booker.open_target_day(target_date)
-                success = booker.book_slot(picked_auto)
-                if success and not is_dry_run_enabled():
-                    set_weekend_booking_lock(saturday, sunday, picked_auto, run_id)
-                    send_calendar_invite(picked_auto)
-                outcome = "Would book (dry run)" if is_dry_run_enabled() else ("Booked" if success else "Failed booking")
-                send_telegram(f"{outcome}: {format_slot(picked_auto)}")
-                booked = True
-                break
+            poll_count = 0
+            while datetime.now(chicago) < deadline_ct:
+                poll_count += 1
+                booker.open_target_day(saturday)
+                saturday_slots = booker.scrape_slots(saturday, "Saturday")
+                booker.open_target_day(sunday)
+                sunday_slots = booker.scrape_slots(sunday, "Sunday")
+                last_all_slots = sorted(saturday_slots + sunday_slots, key=lambda s: s.start)
+                pref_count = sum(1 for s in last_all_slots if is_preferred_time(s))
+                log(
+                    f"poll #{poll_count}: sat={len(saturday_slots)} sun={len(sunday_slots)} "
+                    f"total={len(last_all_slots)} preferred={pref_count}"
+                )
 
-            # On-demand manual runs: skip polling for cancellations and send the
-            # fallback options right away so the user can pick a slot now.
-            if not is_cron_mode() and not is_test_run() and last_all_slots:
-                break
+                picked_auto = choose_auto_book_slot(saturday_slots, sunday_slots)
+                if picked_auto:
+                    log(f"attempting auto-book: {format_slot(picked_auto)}")
+                    target_date = saturday if picked_auto.day_label == "Saturday" else sunday
+                    booker.open_target_day(target_date)
+                    if booker.captcha_visible():
+                        log("CAPTCHA appeared before booking")
+                        send_telegram(f"⚠️ Captcha before booking [{run_id}]")
+                        status = "captcha"
+                        reason = "captcha_before_booking"
+                        break
+                    success = booker.book_slot(picked_auto)
+                    if success and not is_dry_run_enabled():
+                        set_weekend_booking_lock(saturday, sunday, picked_auto, run_id)
+                        send_calendar_invite(picked_auto)
+                    outcome = "Would book (dry run)" if is_dry_run_enabled() else ("Booked" if success else "Failed booking")
+                    send_telegram(f"{outcome}: {format_slot(picked_auto)}")
+                    booked = success
+                    status = "booked" if success else "book_failed"
+                    reason = format_slot(picked_auto)
+                    break
 
-            time.sleep(5)
+                # On-demand manual runs: skip polling for cancellations and send the
+                # fallback options right away so the user can pick a slot now.
+                if not is_cron_mode() and not is_test_run() and last_all_slots:
+                    log("manual run: stopping poll loop — sending fallback options")
+                    break
 
-    if not booked and send_no_avail_notification:
+                time.sleep(5)
+
+            # Save a final state snapshot so we always have something to look at.
+            try:
+                last_shot = str(DATA_DIR / f"last_run_{run_id}.png")
+                booker.page.screenshot(path=last_shot, full_page=True)
+                log(f"final screenshot saved: {last_shot}")
+            except Exception as e:
+                log(f"final screenshot failed: {e}")
+
+    except Exception as e:
+        log(f"CRASH: {type(e).__name__}: {e}")
+        status = "crashed"
+        reason = f"{type(e).__name__}: {e}"
+        send_telegram(f"\U0001F4A5 Pickleball booker [{run_id}] crashed: {type(e).__name__}: {str(e)[:200]}")
+
+    if not booked and status == "unknown":
+        status = "no_preferred_slot" if last_all_slots else "no_slots"
+
+    if not booked and send_no_avail_notification and status not in ("captcha", "crashed"):
         if not is_test_run():
             send_no_availability_email(saturday, sunday)
         if not last_all_slots:
@@ -972,6 +1090,8 @@ def main() -> None:
                 last_all_slots,
                 f"No preferred {preferred_hours_display()} slot found. Tap a number to book a fallback, or N to skip:",
             )
+
+    log(f"end status={status} reason={reason} polls={'n/a' if status == 'crashed' else ''}")
 
 
 if __name__ == "__main__":
