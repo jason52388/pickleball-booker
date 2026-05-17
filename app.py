@@ -591,11 +591,46 @@ class CPDBooker:
     def _human_pause(self, lo: float = 0.8, hi: float = 2.0) -> None:
         self.page.wait_for_timeout(int(random.uniform(lo, hi) * 1000))
 
+    def _debug_capture(self, idx: int, step: str) -> None:
+        """Save a screenshot + page HTML when BOOK_DEBUG=true. No-op otherwise."""
+        if os.getenv("BOOK_DEBUG", "false").lower() != "true":
+            return
+        debug_dir = DATA_DIR / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^a-z0-9]+", "_", step.lower()).strip("_")
+        base = debug_dir / f"{idx:02d}_{safe}"
+        try:
+            self.page.screenshot(path=str(base) + ".png", full_page=True)
+        except Exception as e:
+            print(f"[debug] screenshot failed at {step}: {e}", flush=True)
+        try:
+            html = self.page.content()
+            (Path(str(base) + ".html")).write_text(html, encoding="utf-8")
+        except Exception as e:
+            print(f"[debug] html dump failed at {step}: {e}", flush=True)
+        try:
+            url = self.page.url
+            print(f"[debug] {idx:02d} {step}: {url}", flush=True)
+        except Exception:
+            pass
+
     def book_slot(self, slot: Slot) -> bool:
         if is_dry_run_enabled() and not is_preview_mode():
             return True
         step = "start"
+        idx = 0
+        # Wipe prior debug artifacts at the start of a debug run so we only keep
+        # the captures from this attempt.
+        if os.getenv("BOOK_DEBUG", "false").lower() == "true":
+            debug_dir = DATA_DIR / "debug"
+            if debug_dir.exists():
+                for p in debug_dir.glob("*"):
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
         try:
+            self._debug_capture(idx, "before_click_cell"); idx += 1
             step = "click slot cell"
             print(f"[book_slot] {step}", flush=True)
             row = self.page.locator("tr").nth(slot.row_index)
@@ -604,6 +639,7 @@ class CPDBooker:
             self._human_pause(0.5, 1.2)
             cell.click(timeout=2500)
             self._human_pause(1.5, 3.0)
+            self._debug_capture(idx, "after_click_cell"); idx += 1
 
             # Fill in the required Event name field before confirming
             step = "fill event name"
@@ -619,6 +655,7 @@ class CPDBooker:
                 print(f"[book_slot] event name skipped: {e}", flush=True)
 
             self._human_pause(0.8, 1.8)
+            self._debug_capture(idx, "after_event_name"); idx += 1
 
             step = "click Confirm Bookings"
             print(f"[book_slot] {step}", flush=True)
@@ -629,6 +666,7 @@ class CPDBooker:
                 ]
             )
             self._human_pause(2.0, 4.0)
+            self._debug_capture(idx, "after_confirm_bookings"); idx += 1
 
             step = "waiver checkbox + Save"
             print(f"[book_slot] {step}", flush=True)
@@ -643,6 +681,7 @@ class CPDBooker:
                 self._human_pause(1.5, 3.0)
             except Exception as e:
                 print(f"[book_slot] waiver/save skipped: {e}", flush=True)
+            self._debug_capture(idx, "after_waiver_save"); idx += 1
 
             self._human_pause(1.0, 2.0)
             step = "click Reserve"
@@ -658,12 +697,14 @@ class CPDBooker:
             except Exception:
                 pass
             self._human_pause(2.0, 4.0)
+            self._debug_capture(idx, "after_reserve"); idx += 1
 
-            # Preview mode: screenshot the payment page and send to Telegram, then stop
+            # Preview mode: screenshot the payment page and stop
             if os.getenv("PREVIEW_STOP_BEFORE_PAY", "false").lower() == "true":
                 screenshot_path = str(DATA_DIR / "preview_payment.png")
                 self.page.screenshot(path=screenshot_path, full_page=True)
                 send_telegram_photo(screenshot_path, "Reached payment page — not paying (preview mode)")
+                print(f"[book_slot] preview mode stopped. Screenshot: {screenshot_path}", flush=True)
                 return True
 
             # Checkout page — accept any waiver checkbox, fill CVV inside the payment iframe, then pay
@@ -677,6 +718,7 @@ class CPDBooker:
                     self.page.wait_for_timeout(500)
                 except Exception:
                     pass
+                self._debug_capture(idx, "after_checkout_waiver"); idx += 1
 
                 # CVV + Pay are required to complete the booking — let any failure
                 # bubble up so we don't report a successful booking that didn't happen.
@@ -687,6 +729,7 @@ class CPDBooker:
                 payment_frame = self.page.frame_locator("iframe[src*='checkoutcui.active.com']")
                 cvv_input = payment_frame.locator("input[id*='cvv']")
                 cvv_input.fill(cvv, timeout=5000)
+                self._debug_capture(idx, "after_cvv"); idx += 1
                 step = "click Pay"
                 print(f"[book_slot] {step}", flush=True)
                 self._click_any([("role_button", r"^pay$"), ("css", "button[class*='pay']")])
@@ -695,17 +738,14 @@ class CPDBooker:
                 except Exception:
                     pass
                 self.page.wait_for_timeout(2000)
+                self._debug_capture(idx, "after_pay"); idx += 1
 
             print("[book_slot] done", flush=True)
             return True
         except Exception as e:
             print(f"[book_slot] FAILED at step '{step}': {type(e).__name__}: {e}", flush=True)
-            try:
-                screenshot_path = str(DATA_DIR / "book_failure.png")
-                self.page.screenshot(path=screenshot_path, full_page=True)
-                send_telegram_photo(screenshot_path, f"Booking failed at step: {step}\n{type(e).__name__}: {str(e)[:200]}")
-            except Exception as se:
-                print(f"[book_slot] failure screenshot also failed: {se}", flush=True)
+            self._debug_capture(99, f"FAILED_{step}")
+            return False
             return False
 
 
