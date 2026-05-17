@@ -594,7 +594,10 @@ class CPDBooker:
     def book_slot(self, slot: Slot) -> bool:
         if is_dry_run_enabled() and not is_preview_mode():
             return True
+        step = "start"
         try:
+            step = "click slot cell"
+            print(f"[book_slot] {step}", flush=True)
             row = self.page.locator("tr").nth(slot.row_index)
             cell = row.locator("td.td-grid-cell, td.grid-cell").nth(slot.col_index)
             cell.scroll_into_view_if_needed(timeout=2500)
@@ -603,6 +606,8 @@ class CPDBooker:
             self._human_pause(1.5, 3.0)
 
             # Fill in the required Event name field before confirming
+            step = "fill event name"
+            print(f"[book_slot] {step}", flush=True)
             event_name = os.getenv("BOOKING_EVENT_NAME", "Pickleball")
             try:
                 name_input = self.page.get_by_label(re.compile("event name", re.I)).first
@@ -610,11 +615,13 @@ class CPDBooker:
                 self._human_pause(0.3, 0.7)
                 for ch in event_name:
                     name_input.type(ch, delay=random.randint(60, 160))
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[book_slot] event name skipped: {e}", flush=True)
 
             self._human_pause(0.8, 1.8)
 
+            step = "click Confirm Bookings"
+            print(f"[book_slot] {step}", flush=True)
             self._click_any(
                 [
                     ("role_button", r"confirm bookings?"),
@@ -623,6 +630,8 @@ class CPDBooker:
             )
             self._human_pause(2.0, 4.0)
 
+            step = "waiver checkbox + Save"
+            print(f"[book_slot] {step}", flush=True)
             try:
                 checkbox = self.page.locator("input[type='checkbox']").first
                 checkbox.wait_for(timeout=4000)
@@ -632,10 +641,12 @@ class CPDBooker:
                 self._human_pause(0.5, 1.2)
                 self._click_any([("role_button", r"save"), ("css", "button[class*='save']")])
                 self._human_pause(1.5, 3.0)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[book_slot] waiver/save skipped: {e}", flush=True)
 
             self._human_pause(1.0, 2.0)
+            step = "click Reserve"
+            print(f"[book_slot] {step}", flush=True)
             self._click_any(
                 [
                     ("role_button", r"^reserve$"),
@@ -671,9 +682,13 @@ class CPDBooker:
                 # bubble up so we don't report a successful booking that didn't happen.
                 # The networkidle wait stays inside its own try/except because a slow
                 # idle-check shouldn't void a payment that already went through.
+                step = "fill CVV"
+                print(f"[book_slot] {step}", flush=True)
                 payment_frame = self.page.frame_locator("iframe[src*='checkoutcui.active.com']")
                 cvv_input = payment_frame.locator("input[id*='cvv']")
                 cvv_input.fill(cvv, timeout=5000)
+                step = "click Pay"
+                print(f"[book_slot] {step}", flush=True)
                 self._click_any([("role_button", r"^pay$"), ("css", "button[class*='pay']")])
                 try:
                     self.page.wait_for_load_state("networkidle", timeout=15000)
@@ -681,8 +696,16 @@ class CPDBooker:
                     pass
                 self.page.wait_for_timeout(2000)
 
+            print("[book_slot] done", flush=True)
             return True
-        except Exception:
+        except Exception as e:
+            print(f"[book_slot] FAILED at step '{step}': {type(e).__name__}: {e}", flush=True)
+            try:
+                screenshot_path = str(DATA_DIR / "book_failure.png")
+                self.page.screenshot(path=screenshot_path, full_page=True)
+                send_telegram_photo(screenshot_path, f"Booking failed at step: {step}\n{type(e).__name__}: {str(e)[:200]}")
+            except Exception as se:
+                print(f"[book_slot] failure screenshot also failed: {se}", flush=True)
             return False
 
 
