@@ -722,6 +722,20 @@ class CPDBooker:
             self._debug_capture(idx, "after_waiver_save"); idx += 1
 
             self._human_pause(1.0, 2.0)
+            # Give reCAPTCHA Enterprise some behavioral signals before Reserve.
+            # With no pointer or scroll activity the score drops low enough
+            # that the server rejects the Reserve action with
+            # "reCAPTCHA verification failed, please re-login."
+            try:
+                self.page.mouse.move(640, 400)
+                self._human_pause(0.3, 0.7)
+                self.page.mouse.move(800, 500, steps=10)
+                self._human_pause(0.4, 0.9)
+                self.page.mouse.wheel(0, random.randint(80, 240))
+                self._human_pause(0.5, 1.2)
+            except Exception:
+                pass
+
             step = "click Reserve"
             print(f"[book_slot] {step}", flush=True)
             self._click_any(
