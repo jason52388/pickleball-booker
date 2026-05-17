@@ -844,8 +844,11 @@ def main() -> None:
     if is_test_run():
         # Test runs (dry-run or preview) use a rolling window so they work any time of day.
         deadline_ct = dry_run_poll_deadline_ct(now_ct)
-    else:
+    elif is_cron_mode():
         deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
+    else:
+        # On-demand manual run: 10-minute window starting now.
+        deadline_ct = now_ct + timedelta(minutes=10)
 
     saturday, sunday = upcoming_weekend(now_ct)
 
@@ -861,6 +864,8 @@ def main() -> None:
         # Reset deadline after login so the polling window starts when scraping can actually begin.
         if is_test_run():
             deadline_ct = dry_run_poll_deadline_ct(datetime.now(chicago))
+        elif not is_cron_mode():
+            deadline_ct = datetime.now(chicago) + timedelta(minutes=10)
 
         while datetime.now(chicago) < deadline_ct:
             booker.open_target_day(saturday)
