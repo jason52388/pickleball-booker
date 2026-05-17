@@ -888,6 +888,11 @@ def main() -> None:
                 booked = True
                 break
 
+            # On-demand manual runs: skip polling for cancellations and send the
+            # fallback options right away so the user can pick a slot now.
+            if not is_cron_mode() and not is_test_run() and last_all_slots:
+                break
+
             time.sleep(5)
 
     if not booked and send_no_avail_notification:
