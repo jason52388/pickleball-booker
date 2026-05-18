@@ -634,18 +634,20 @@ class CPDBooker:
     def _human_pause(self, lo: float = 0.8, hi: float = 2.0) -> None:
         self.page.wait_for_timeout(int(random.uniform(lo, hi) * 1000))
 
-    def _debug_capture(self, idx: int, step: str) -> None:
-        """Save a screenshot + page HTML when BOOK_DEBUG=true. No-op otherwise."""
-        if os.getenv("BOOK_DEBUG", "false").lower() != "true":
+    def _debug_capture(self, idx: int, step: str, force: bool = False) -> Optional[str]:
+        """Save a screenshot + page HTML when BOOK_DEBUG=true, or on forced failure."""
+        if not force and os.getenv("BOOK_DEBUG", "false").lower() != "true":
             return
         debug_dir = DATA_DIR / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^a-z0-9]+", "_", step.lower()).strip("_")
         base = debug_dir / f"{idx:02d}_{safe}"
+        screenshot_path = str(base) + ".png"
         try:
-            self.page.screenshot(path=str(base) + ".png", full_page=True)
+            self.page.screenshot(path=screenshot_path, full_page=True)
         except Exception as e:
             print(f"[debug] screenshot failed at {step}: {e}", flush=True)
+            screenshot_path = None
         try:
             html = self.page.content()
             (Path(str(base) + ".html")).write_text(html, encoding="utf-8")
@@ -656,6 +658,60 @@ class CPDBooker:
             print(f"[debug] {idx:02d} {step}: {url}", flush=True)
         except Exception:
             pass
+        return screenshot_path
+
+    def _page_text_lower(self) -> str:
+        try:
+            return self.page.locator("body").inner_text(timeout=1500).lower()
+        except Exception:
+            return ""
+
+    def _raise_if_service_error(self) -> None:
+        text = self._page_text_lower()
+        service_error_markers = [
+            "service error",
+            "recaptcha verification failed",
+            "please re-login",
+            "please re-login",
+        ]
+        if any(marker in text for marker in service_error_markers):
+            snippet = re.sub(r"\s+", " ", text)[:500]
+            raise RuntimeError(f"Service Error after Reserve: {snippet}")
+
+    def _find_cvv_input(self, timeout_ms: int = 45000):
+        """Find a CVV/CVC/security-code field in any frame, regardless of iframe host."""
+        deadline = time.time() + timeout_ms / 1000
+        selectors = [
+            'input[id*="cvv" i]',
+            'input[name*="cvv" i]',
+            'input[aria-label*="cvv" i]',
+            'input[placeholder*="cvv" i]',
+            'input[id*="cvc" i]',
+            'input[name*="cvc" i]',
+            'input[aria-label*="cvc" i]',
+            'input[placeholder*="cvc" i]',
+            'input[autocomplete="cc-csc"]',
+            'input[id*="security" i]',
+            'input[name*="security" i]',
+        ]
+        while time.time() < deadline:
+            self._raise_if_service_error()
+            for frame in self.page.frames:
+                for selector in selectors:
+                    try:
+                        candidate = frame.locator(selector).first
+                        if candidate.is_visible(timeout=250):
+                            return candidate
+                    except Exception:
+                        continue
+            self.page.wait_for_timeout(500)
+
+        iframe_urls = []
+        try:
+            iframe_urls = [frame.url for frame in self.page.frames if frame.url and frame.url != self.page.url]
+        except Exception:
+            pass
+        raise RuntimeError(f"CVV input not found in any frame. iframe_urls={iframe_urls}")
 
     def book_slot(self, slot: Slot) -> bool:
         if is_dry_run_enabled() and not is_preview_mode():
@@ -755,6 +811,7 @@ class CPDBooker:
                 pass
             self._human_pause(2.0, 4.0)
             self._debug_capture(idx, "after_reserve"); idx += 1
+            self._raise_if_service_error()
 
             # Preview mode: screenshot the payment page and stop
             if os.getenv("PREVIEW_STOP_BEFORE_PAY", "false").lower() == "true":
@@ -783,13 +840,7 @@ class CPDBooker:
                 # idle-check shouldn't void a payment that already went through.
                 step = "fill CVV"
                 print(f"[book_slot] {step}", flush=True)
-                # The payment iframe loads from a third-party host (Active.com
-                # checkout) and frequently takes >5s on first navigation. Wait
-                # for the iframe element on the main page before reaching into it.
-                self.page.locator("iframe[src*='checkoutcui.active.com']").wait_for(timeout=30000)
-                payment_frame = self.page.frame_locator("iframe[src*='checkoutcui.active.com']")
-                cvv_input = payment_frame.locator("input[id*='cvv']")
-                cvv_input.wait_for(state="visible", timeout=20000)
+                cvv_input = self._find_cvv_input(timeout_ms=45000)
                 cvv_input.fill(cvv, timeout=10000)
                 self._debug_capture(idx, "after_cvv"); idx += 1
                 step = "click Pay"
@@ -806,8 +857,9 @@ class CPDBooker:
             return True
         except Exception as e:
             print(f"[book_slot] FAILED at step '{step}': {type(e).__name__}: {e}", flush=True)
-            self._debug_capture(99, f"FAILED_{step}")
-            return False
+            shot = self._debug_capture(99, f"FAILED_{step}", force=True)
+            if shot:
+                send_telegram_photo(shot, f"Booking failed at {step}: {type(e).__name__}")
             return False
 
 
