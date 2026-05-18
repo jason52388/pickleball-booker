@@ -452,7 +452,14 @@ class CPDBooker:
             pass
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
-        sign_in.evaluate("el => el.click()")
+        # Prefer a real mouse click — el.click() via evaluate() is a synthetic
+        # MouseEvent with no preceding pointer trajectory. Fall back to the JS
+        # click only if the real click is intercepted by an overlay.
+        try:
+            self._human_mouse_to(sign_in)
+            sign_in.click(timeout=5000)
+        except Exception:
+            sign_in.evaluate("el => el.click()")
         try:
             self.page.wait_for_url("**/signin**", timeout=30000)
             self.page.wait_for_load_state("domcontentloaded", timeout=30000)
@@ -478,6 +485,16 @@ class CPDBooker:
             ],
             self.password,
         )
+        # Beat between finishing typing and hitting submit — no human goes
+        # last-keystroke → click in <100ms.
+        self._human_idle(0.6, 1.4)
+        try:
+            submit_btn = self.page.get_by_role(
+                "button", name=re.compile(r"sign in|log in", re.I)
+            ).first
+            self._human_mouse_to(submit_btn)
+        except Exception:
+            pass
         self._click_any(
             [
                 ("role_button", r"sign in|log in"),
@@ -535,7 +552,22 @@ class CPDBooker:
                     locator = self.page.locator(selector).first
                 else:
                     continue
-                locator.fill(value, timeout=10000)
+                # Hover-then-click-then-type. fill() sets .value directly and
+                # dispatches a single input event, which behavioral scoring can
+                # distinguish from real keystrokes. Per-char type() fires
+                # keydown/keypress/keyup at randomized intervals.
+                self._human_mouse_to(locator)
+                locator.click(timeout=10000)
+                self.page.wait_for_timeout(random.randint(150, 400))
+                # Clear any prefilled value first (Ctrl+A, Delete) so we don't
+                # append onto an autofilled string.
+                try:
+                    locator.press("Control+a", timeout=2000)
+                    locator.press("Delete", timeout=2000)
+                except Exception:
+                    pass
+                for ch in value:
+                    locator.type(ch, delay=random.randint(55, 165))
                 return
             except Exception as exc:  # pragma: no cover - browser-dependent
                 last_error = exc
@@ -545,9 +577,14 @@ class CPDBooker:
         # The date picker is a custom combobox (inputmode="none") — fill() is ignored.
         # Must click to open the calendar popup, navigate months, then click the target day.
         self._dismiss_modal()
+        # Light pointer activity before touching the date picker — every page
+        # visit feeds the reCAPTCHA score, not just the booking flow.
+        self._human_idle(0.4, 1.0)
         date_input = self.page.get_by_label("Date picker, current date")
+        self._human_mouse_to(date_input)
         date_input.click(timeout=10000)
         self.page.locator(".an-calendar").wait_for(timeout=5000)
+        self._human_idle(0.3, 0.7)
 
         target_month = target_date.strftime("%B %Y")  # e.g. "May 2026"
         for _ in range(24):
@@ -556,8 +593,10 @@ class CPDBooker:
                 break
             header_date = datetime.strptime(header, "%B %Y")
             arrow = ".icon-chevron-right" if header_date < target_date else ".icon-chevron-left"
-            self.page.locator(arrow).click()
-            self.page.wait_for_timeout(400)
+            arrow_loc = self.page.locator(arrow).first
+            self._human_mouse_to(arrow_loc, settle_ms=(80, 220))
+            arrow_loc.click()
+            self.page.wait_for_timeout(random.randint(280, 620))
 
         day_str = str(target_date.day)
         day_cells = self.page.locator(".an-calendar-day:not(.an-calendar-day-othermonth)")
@@ -565,6 +604,7 @@ class CPDBooker:
         for i in range(count):
             cell = day_cells.nth(i)
             if cell.inner_text(timeout=1000).strip() == day_str:
+                self._human_mouse_to(cell)
                 cell.click()
                 break
 
@@ -572,7 +612,7 @@ class CPDBooker:
             self.page.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
-        self.page.wait_for_timeout(3000)
+        self._human_idle(2.0, 3.4)
 
     def scrape_slots(self, target_date: datetime, day_label: str) -> List[Slot]:
         extracted = self.page.evaluate(
@@ -639,6 +679,66 @@ class CPDBooker:
 
     def _human_pause(self, lo: float = 0.8, hi: float = 2.0) -> None:
         self.page.wait_for_timeout(int(random.uniform(lo, hi) * 1000))
+
+    def _human_mouse_jitter(self) -> None:
+        """Small random cursor drift to seed pointer entropy."""
+        try:
+            x = random.randint(200, 1100)
+            y = random.randint(150, 650)
+            self.page.mouse.move(x, y, steps=random.randint(8, 18))
+        except Exception:
+            pass
+
+    def _human_mouse_to(self, locator, settle_ms: Tuple[int, int] = (120, 350)) -> None:
+        """Move cursor toward an element along a curved 2-hop path, then settle.
+
+        reCAPTCHA Enterprise looks at pointer trajectories, not just final position.
+        A straight `mouse.move(x, y, steps=N)` is linear in both axes; real users
+        approach via an arc and overshoot/correct. Two hops with a jittered
+        midpoint plus a randomized landing point inside the bbox approximate that
+        cheaply.
+        """
+        try:
+            box = locator.bounding_box()
+            if not box:
+                return
+            tx = box["x"] + box["width"] * random.uniform(0.3, 0.7)
+            ty = box["y"] + box["height"] * random.uniform(0.3, 0.7)
+            mx = tx + random.randint(-140, 140)
+            my = ty + random.randint(-90, 90)
+            self.page.mouse.move(mx, my, steps=random.randint(10, 18))
+            self.page.mouse.move(tx, ty, steps=random.randint(12, 22))
+            self.page.wait_for_timeout(random.randint(settle_ms[0], settle_ms[1]))
+        except Exception:
+            pass
+
+    def _human_scroll(self) -> None:
+        try:
+            amt = random.randint(80, 260)
+            if random.random() < 0.3:
+                amt = -amt // 2
+            self.page.mouse.wheel(0, amt)
+        except Exception:
+            pass
+
+    def _human_idle(self, lo: float = 0.8, hi: float = 2.0) -> None:
+        """Pause that also produces pointer activity, instead of a dead sleep.
+
+        Drop-in replacement for `_human_pause` at points where the page is
+        otherwise static (between clicks, after navigation). Reads as 'human
+        glancing around' to behavioral scoring.
+        """
+        total_ms = int(random.uniform(lo, hi) * 1000)
+        elapsed = 0
+        while elapsed < total_ms:
+            step = min(random.randint(180, 450), total_ms - elapsed)
+            r = random.random()
+            if r < 0.45:
+                self._human_mouse_jitter()
+            elif r < 0.6:
+                self._human_scroll()
+            self.page.wait_for_timeout(step)
+            elapsed += step
 
     def _debug_capture(self, idx: int, step: str, force: bool = False) -> Optional[str]:
         """Save a screenshot + page HTML when BOOK_DEBUG=true, or on forced failure."""
@@ -736,14 +836,21 @@ class CPDBooker:
                         pass
         try:
             self._debug_capture(idx, "before_click_cell"); idx += 1
+            # Seed some pointer entropy *before* the first interaction. reCAPTCHA
+            # Enterprise scores the whole session — a flow that goes straight from
+            # page-load to clicking a grid cell with zero mouse activity in between
+            # looks scripted regardless of what happens later.
+            self._human_idle(0.8, 1.6)
+
             step = "click slot cell"
             print(f"[book_slot] {step}", flush=True)
             row = self.page.locator("tr").nth(slot.row_index)
             cell = row.locator("td.td-grid-cell, td.grid-cell").nth(slot.col_index)
             cell.scroll_into_view_if_needed(timeout=2500)
-            self._human_pause(0.5, 1.2)
+            self._human_idle(0.5, 1.2)
+            self._human_mouse_to(cell)
             cell.click(timeout=2500)
-            self._human_pause(1.5, 3.0)
+            self._human_idle(1.5, 3.0)
             self._debug_capture(idx, "after_click_cell"); idx += 1
 
             # Fill in the required Event name field before confirming
@@ -752,6 +859,7 @@ class CPDBooker:
             event_name = os.getenv("BOOKING_EVENT_NAME", "Pickleball")
             try:
                 name_input = self.page.get_by_label(re.compile("event name", re.I)).first
+                self._human_mouse_to(name_input)
                 name_input.click(timeout=10000)
                 self._human_pause(0.3, 0.7)
                 for ch in event_name:
@@ -759,18 +867,25 @@ class CPDBooker:
             except Exception as e:
                 print(f"[book_slot] event name skipped: {e}", flush=True)
 
-            self._human_pause(0.8, 1.8)
+            self._human_idle(0.8, 1.8)
             self._debug_capture(idx, "after_event_name"); idx += 1
 
             step = "click Confirm Bookings"
             print(f"[book_slot] {step}", flush=True)
+            try:
+                confirm_btn = self.page.get_by_role(
+                    "button", name=re.compile(r"confirm bookings?", re.I)
+                ).first
+                self._human_mouse_to(confirm_btn)
+            except Exception:
+                pass
             self._click_any(
                 [
                     ("role_button", r"confirm bookings?"),
                     ("css", "button[class*='confirm']"),
                 ]
             )
-            self._human_pause(2.0, 4.0)
+            self._human_idle(2.0, 4.0)
             self._debug_capture(idx, "after_confirm_bookings"); idx += 1
 
             step = "waiver checkbox + Save"
@@ -779,32 +894,45 @@ class CPDBooker:
                 checkbox = self.page.locator("input[type='checkbox']").first
                 checkbox.wait_for(timeout=4000)
                 if not checkbox.is_checked():
-                    self._human_pause(0.5, 1.0)
-                    checkbox.check()
-                self._human_pause(0.5, 1.2)
+                    self._human_idle(0.5, 1.0)
+                    # Real mouse click instead of .check() — .check() sets the
+                    # checked property programmatically and does not dispatch a
+                    # full mousedown/mouseup pair. Behavioral scoring sees the
+                    # difference.
+                    self._human_mouse_to(checkbox)
+                    try:
+                        checkbox.click(timeout=2000)
+                    except Exception:
+                        checkbox.check()
+                self._human_idle(0.5, 1.2)
+                try:
+                    save_btn = self.page.get_by_role(
+                        "button", name=re.compile(r"save", re.I)
+                    ).first
+                    self._human_mouse_to(save_btn)
+                except Exception:
+                    pass
                 self._click_any([("role_button", r"save"), ("css", "button[class*='save']")])
-                self._human_pause(1.5, 3.0)
+                self._human_idle(1.5, 3.0)
             except Exception as e:
                 print(f"[book_slot] waiver/save skipped: {e}", flush=True)
             self._debug_capture(idx, "after_waiver_save"); idx += 1
 
-            self._human_pause(1.0, 2.0)
-            # Give reCAPTCHA Enterprise some behavioral signals before Reserve.
-            # With no pointer or scroll activity the score drops low enough
-            # that the server rejects the Reserve action with
-            # "reCAPTCHA verification failed, please re-login."
-            try:
-                self.page.mouse.move(640, 400)
-                self._human_pause(0.3, 0.7)
-                self.page.mouse.move(800, 500, steps=10)
-                self._human_pause(0.4, 0.9)
-                self.page.mouse.wheel(0, random.randint(80, 240))
-                self._human_pause(0.5, 1.2)
-            except Exception:
-                pass
+            # Steady activity on the way to Reserve. Entropy is now spread across
+            # the whole flow rather than crammed into the last second — that
+            # 'sudden wiggle right before the gated action' pattern is itself a
+            # signal.
+            self._human_idle(1.4, 2.6)
 
             step = "click Reserve"
             print(f"[book_slot] {step}", flush=True)
+            try:
+                reserve_btn = self.page.get_by_role(
+                    "button", name=re.compile(r"^reserve$", re.I)
+                ).first
+                self._human_mouse_to(reserve_btn)
+            except Exception:
+                pass
             self._click_any(
                 [
                     ("role_button", r"^reserve$"),
@@ -831,11 +959,14 @@ class CPDBooker:
             cvv = os.getenv("CREDIT_CARD_CVV", "")
             if cvv:
                 try:
-                    # Accept waiver checkbox if present on the main page
                     waiver = self.page.locator("input[type='checkbox']").first
                     if waiver.is_visible(timeout=2000) and not waiver.is_checked():
-                        waiver.check()
-                    self.page.wait_for_timeout(500)
+                        self._human_mouse_to(waiver)
+                        try:
+                            waiver.click(timeout=2000)
+                        except Exception:
+                            waiver.check()
+                    self._human_idle(0.4, 0.9)
                 except Exception:
                     pass
                 self._debug_capture(idx, "after_checkout_waiver"); idx += 1
