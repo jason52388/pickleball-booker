@@ -361,14 +361,20 @@ class CPDBooker:
                 "username": proxy_user,
                 "password": proxy_pass,
             }
+        browser_channel = (os.getenv("BROWSER_CHANNEL") or "chrome").strip()
         try:
+            print(f"[browser] launching channel={browser_channel!r} headless={headless}", flush=True)
             self.context = self.pw.chromium.launch_persistent_context(
-                profile_dir, channel="chrome", **launch_kwargs
+                profile_dir, channel=browser_channel, **launch_kwargs
             )
-        except Exception:
+            print(f"[browser] launched channel={browser_channel!r}", flush=True)
+        except Exception as e:
+            print(f"[browser] channel={browser_channel!r} failed: {type(e).__name__}: {e}", flush=True)
+            print("[browser] falling back to bundled chromium", flush=True)
             self.context = self.pw.chromium.launch_persistent_context(
                 profile_dir, **launch_kwargs
             )
+            print("[browser] launched bundled chromium", flush=True)
         self.context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )

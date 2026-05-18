@@ -9,6 +9,7 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt && \
     playwright install --with-deps chromium && \
+    playwright install chrome && \
     apt-get install -y --no-install-recommends xvfb xauth cron procps && \
     rm -rf /var/lib/apt/lists/*
 
