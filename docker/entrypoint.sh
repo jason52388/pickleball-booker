@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+if [ "${BROWSER_HEADLESS,,}" = "false" ]; then
+  export DISPLAY="${DISPLAY:-:99}"
+fi
+
 # Make env vars available to cron jobs (cron doesn't inherit the container environment)
 printenv | grep -v "^_=" | grep -v "^SHLVL=" >> /etc/environment
 
@@ -9,9 +13,10 @@ pkill -f chrome || true
 find /app/data/browser_profile -name "SingletonLock" -delete 2>/dev/null || true
 
 if [ "${BROWSER_HEADLESS,,}" = "false" ]; then
-  export DISPLAY="${DISPLAY:-:99}"
-  Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp &
-  echo "Started Xvfb on DISPLAY=$DISPLAY"
+  if ! pgrep -f "Xvfb ${DISPLAY}" >/dev/null 2>&1; then
+    Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp &
+    echo "Started Xvfb on DISPLAY=$DISPLAY"
+  fi
 fi
 
 # Start cron daemon
