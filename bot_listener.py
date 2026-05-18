@@ -58,13 +58,10 @@ def handle_booking(booker: CPDBooker, pending: dict, picked: Slot) -> Optional[L
     run_id = pending["run_id"]
     target_date = saturday if picked.day_label == "Saturday" else sunday
 
-    # Re-navigate the booking page so reCAPTCHA Enterprise generates a fresh
-    # token. Without this, clicking Reserve after a Telegram fallback tap
-    # (which can be minutes or hours after the original scrape) fails with a
-    # "reCAPTCHA verification failed, please re-login" Service Error modal —
-    # the original page's token is long-stale by the time the user taps.
-    booker.login()
-
+    # ensure_booker() already called login() immediately before this function,
+    # so reCAPTCHA has a fresh token from that recent navigation. No second
+    # login() needed — a double goto() leaves the page mid-load and causes
+    # open_target_day to time out on the date picker.
     booker.open_target_day(target_date)
 
     sat_slots = booker.scrape_slots(saturday, "Saturday")
