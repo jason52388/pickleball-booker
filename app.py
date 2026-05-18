@@ -441,7 +441,7 @@ class CPDBooker:
         self._dismiss_modal()
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
-        sign_in.click(timeout=8000, no_wait_after=True)
+        sign_in.click(timeout=8000, no_wait_after=True, force=True)
         try:
             self.page.wait_for_url("**/signin**", timeout=30000)
             self.page.wait_for_load_state("domcontentloaded", timeout=30000)
