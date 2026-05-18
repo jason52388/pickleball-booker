@@ -21,22 +21,14 @@ from app import (
 from typing import List, Optional
 
 
-def ensure_booker(booker: Optional[CPDBooker]) -> CPDBooker:
-    """Return a logged-in booker, reusing the existing one if possible.
+def open_booker() -> CPDBooker:
+    """Open a fresh logged-in browser for a single Telegram action.
 
-    CPDBooker.login() is idempotent — it just reloads the reservation page when
-    the session is already authenticated — so calling it again is the cheapest
-    way to verify the browser is still healthy and on the right page.
+    The VPS runs bot_listener.py continuously while manual/cron jobs may also
+    start CPDBooker. Holding a persistent Chromium profile open between Telegram
+    updates leaves SingletonLock in place and makes later daily_runner launches
+    hang or time out. Keep the browser lifetime scoped to one action instead.
     """
-    if booker is not None:
-        try:
-            booker.login()
-            return booker
-        except Exception:
-            try:
-                booker.__exit__(None, None, None)
-            except Exception:
-                pass
     booker = CPDBooker()
     booker.__enter__()
     booker.login()
@@ -95,42 +87,40 @@ def run() -> None:
 
     print("Bot listener started.", flush=True)
 
-    booker: Optional[CPDBooker] = None
-    try:
-        while True:
-            resp = _telegram_api("getUpdates", {"offset": offset, "timeout": 30})
-            # If the API call failed (returned {}), back off to avoid hammering Telegram.
-            if not resp.get("ok"):
-                time.sleep(5)
+    while True:
+        resp = _telegram_api("getUpdates", {"offset": offset, "timeout": 30})
+        # If the API call failed (returned {}), back off to avoid hammering Telegram.
+        if not resp.get("ok"):
+            time.sleep(5)
+            continue
+        for update in resp.get("result", []):
+            offset = update["update_id"] + 1
+
+            if "callback_query" not in update:
                 continue
-            for update in resp.get("result", []):
-                offset = update["update_id"] + 1
 
-                if "callback_query" not in update:
-                    continue
+            cq = update["callback_query"]
+            if str(cq["from"]["id"]) != chat_id:
+                continue
 
-                cq = update["callback_query"]
-                if str(cq["from"]["id"]) != chat_id:
-                    continue
+            _telegram_api("answerCallbackQuery", {"callback_query_id": cq["id"]})
+            data = cq["data"].strip()
 
-                _telegram_api("answerCallbackQuery", {"callback_query_id": cq["id"]})
-                data = cq["data"].strip()
+            pending = load_pending_choice()
+            if not pending:
+                send_telegram("No active booking request.")
+                continue
 
-                pending = load_pending_choice()
-                if not pending:
-                    send_telegram("No active booking request.")
-                    continue
+            saturday = datetime.fromisoformat(pending["saturday"])
+            sunday = datetime.fromisoformat(pending["sunday"])
 
-                saturday = datetime.fromisoformat(pending["saturday"])
-                sunday = datetime.fromisoformat(pending["sunday"])
+            if data == "N":
+                send_telegram("Skipped — nothing booked.")
+                clear_pending_choice()
 
-                if data == "N":
-                    send_telegram("Skipped — nothing booked.")
-                    clear_pending_choice()
-
-                elif data == "\U0001f504 Refresh":
-                    send_telegram("Refreshing available times...")
-                    booker = ensure_booker(booker)
+            elif data == "\U0001f504 Refresh":
+                send_telegram("Refreshing available times...")
+                with open_booker() as booker:
                     slots = refresh_slots(booker, saturday, sunday)
                     if slots:
                         pending["slots"] = [slot_to_dict(s) for s in slots]
@@ -140,14 +130,14 @@ def run() -> None:
                         send_telegram("No slots available anymore.")
                         clear_pending_choice()
 
-                elif data.isdigit():
-                    slots = [slot_from_dict(s) for s in pending["slots"]]
-                    idx = int(data) - 1
-                    if not (0 <= idx < len(slots)):
-                        continue
-                    picked = slots[idx]
-                    send_telegram(f"Checking availability and booking {format_slot(picked)}...")
-                    booker = ensure_booker(booker)
+            elif data.isdigit():
+                slots = [slot_from_dict(s) for s in pending["slots"]]
+                idx = int(data) - 1
+                if not (0 <= idx < len(slots)):
+                    continue
+                picked = slots[idx]
+                send_telegram(f"Checking availability and booking {format_slot(picked)}...")
+                with open_booker() as booker:
                     leftover = handle_booking(booker, pending, picked)
                     if leftover is None:
                         clear_pending_choice()
@@ -158,12 +148,6 @@ def run() -> None:
                     else:
                         send_telegram("That slot is gone and no other slots are available.")
                         clear_pending_choice()
-    finally:
-        if booker is not None:
-            try:
-                booker.__exit__(None, None, None)
-            except Exception:
-                pass
 
 
 if __name__ == "__main__":
