@@ -439,10 +439,13 @@ class CPDBooker:
             print("Login complete (session reused).", flush=True)
             return
         self._dismiss_modal()
+        # Wait for the loading bar to clear before clicking Sign In.
+        try:
+            self.page.locator(".loading-bar__outer-box").wait_for(state="hidden", timeout=15000)
+        except Exception:
+            pass
         sign_in = self.page.locator("a:has-text('Sign In'), a:has-text('Sign in now')").first
         sign_in.wait_for(state="visible", timeout=10000)
-        # Use JS dispatch to bypass any overlay (cookie banner, loading mask)
-        # that intercepts the click and prevents navigation.
         sign_in.evaluate("el => el.click()")
         try:
             self.page.wait_for_url("**/signin**", timeout=30000)
