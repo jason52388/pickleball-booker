@@ -5,6 +5,7 @@ Managed by systemd — restarts automatically on crash.
 """
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -18,10 +19,11 @@ from app import (
     send_calendar_invite, set_weekend_booking_lock,
     is_dry_run_enabled, upcoming_weekend,
 )
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 
-def open_booker() -> CPDBooker:
+@contextmanager
+def open_booker() -> Iterator[CPDBooker]:
     """Open a fresh logged-in browser for a single Telegram action.
 
     The VPS runs bot_listener.py continuously while manual/cron jobs may also
@@ -30,9 +32,15 @@ def open_booker() -> CPDBooker:
     hang or time out. Keep the browser lifetime scoped to one action instead.
     """
     booker = CPDBooker()
-    booker.__enter__()
-    booker.login()
-    return booker
+    try:
+        booker.__enter__()
+        booker.login()
+        yield booker
+    finally:
+        try:
+            booker.__exit__(None, None, None)
+        except Exception:
+            pass
 
 
 def refresh_slots(booker: CPDBooker, saturday: datetime, sunday: datetime) -> List[Slot]:
