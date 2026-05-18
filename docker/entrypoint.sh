@@ -8,6 +8,12 @@ printenv | grep -v "^_=" | grep -v "^SHLVL=" >> /etc/environment
 pkill -f chrome || true
 find /app/data/browser_profile -name "SingletonLock" -delete 2>/dev/null || true
 
+if [ "${BROWSER_HEADLESS,,}" = "false" ]; then
+  export DISPLAY="${DISPLAY:-:99}"
+  Xvfb "$DISPLAY" -screen 0 1280x800x24 -nolisten tcp &
+  echo "Started Xvfb on DISPLAY=$DISPLAY"
+fi
+
 # Start cron daemon
 cron
 
