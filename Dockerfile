@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 COPY . .
 
 RUN mkdir -p data && \
-    chmod +x docker/entrypoint.sh && \
+    chmod +x docker/entrypoint.sh docker/run_python.sh && \
     cp docker/crontab /etc/cron.d/pickleball && \
     chmod 0644 /etc/cron.d/pickleball
 
