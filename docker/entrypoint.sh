@@ -4,8 +4,9 @@ set -e
 # Make env vars available to cron jobs (cron doesn't inherit the container environment)
 printenv | grep -v "^_=" | grep -v "^SHLVL=" >> /etc/environment
 
-# Clean up any leftover browser processes from previous runs
+# Clean up any leftover browser processes and stale lock files from previous runs
 pkill -f chrome || true
+find /app/data/browser_profile -name "SingletonLock" -delete 2>/dev/null || true
 
 # Start cron daemon
 cron
