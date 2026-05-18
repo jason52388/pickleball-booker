@@ -1,3 +1,2 @@
 # Pickleball booker — runs daily at 7:00 AM CT (12:00 UTC)
-0 12 * * * root cd /app && CRON_MODE=true python3 /app/daily_runner.py >> /app/data/cron.log 2>&1
-
+0 12 * * * root cd /app && CRON_MODE=true /app/docker/run_python.sh /app/daily_runner.py >> /app/data/cron.log 2>&1

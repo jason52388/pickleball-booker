@@ -12,4 +12,4 @@ find /app/data/browser_profile -name "SingletonLock" -delete 2>/dev/null || true
 cron
 
 echo "Starting Telegram bot listener..."
-exec python3 bot_listener.py
+exec /app/docker/run_python.sh bot_listener.py
