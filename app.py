@@ -499,6 +499,102 @@ class CPDBooker:
                 continue
         return False
 
+    def log_fingerprint_diagnostics(self) -> None:
+        """Dump the patched fingerprint properties so we can confirm the init
+        script actually applied. If reCAPTCHA is still failing, this rules out
+        'the patches never landed' as a cause.
+        """
+        try:
+            data = self.page.evaluate(
+                """
+                () => ({
+                    webdriver: navigator.webdriver,
+                    plugins_len: (navigator.plugins || {length: -1}).length,
+                    languages: navigator.languages,
+                    chrome_present: typeof window.chrome,
+                    chrome_runtime: !!(window.chrome && window.chrome.runtime),
+                    ua: navigator.userAgent,
+                    platform: navigator.platform,
+                    hw_concurrency: navigator.hardwareConcurrency,
+                    webgl_vendor: (() => {
+                        try {
+                            const c = document.createElement('canvas').getContext('webgl');
+                            return c ? c.getParameter(37445) : 'no-webgl';
+                        } catch (e) { return 'err:' + e.message; }
+                    })(),
+                    webgl_renderer: (() => {
+                        try {
+                            const c = document.createElement('canvas').getContext('webgl');
+                            return c ? c.getParameter(37446) : 'no-webgl';
+                        } catch (e) { return 'err:' + e.message; }
+                    })(),
+                })
+                """
+            )
+            print(f"[fingerprint] {json.dumps(data)}", flush=True)
+        except Exception as e:
+            print(f"[fingerprint] eval failed: {type(e).__name__}: {e}", flush=True)
+
+    def clear_cart(self) -> None:
+        """Empty any leftover items in the My Cart before starting a booking.
+
+        Stale cart items survive across runs in the persistent profile. They
+        inflate the total (we pay $40 instead of $20), and showing up at
+        Reserve with a multi-item cart you didn't build this session is
+        itself a bot-shaped pattern.
+        """
+        try:
+            cart_link = self.page.get_by_role("link", name=re.compile(r"my cart", re.I)).first
+            if not cart_link.is_visible(timeout=2000):
+                return
+            # Only bother visiting the cart if the badge shows items.
+            badge_text = ""
+            try:
+                badge_text = cart_link.inner_text(timeout=1000)
+            except Exception:
+                pass
+            # Match a digit > 0 in the badge ('My Cart 2', 'My Cart (2)', etc.)
+            if not re.search(r"[1-9]", badge_text or ""):
+                return
+            print(f"[cart] stale items detected ({badge_text!r}) — clearing", flush=True)
+            self._human_mouse_to(cart_link)
+            cart_link.click(timeout=5000)
+            self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+            self._human_idle(1.0, 2.0)
+            # Common "remove from cart" affordances on Active Network sites.
+            for _ in range(8):
+                remove = self.page.locator(
+                    "a:has-text('Remove'), button:has-text('Remove'), "
+                    "a:has-text('Empty Cart'), button:has-text('Empty Cart')"
+                ).first
+                try:
+                    if not remove.is_visible(timeout=1500):
+                        break
+                    self._human_mouse_to(remove)
+                    remove.click(timeout=3000)
+                    self._human_idle(0.8, 1.5)
+                    # Some sites pop a confirmation modal.
+                    try:
+                        confirm = self.page.get_by_role(
+                            "button", name=re.compile(r"^(yes|confirm|ok)$", re.I)
+                        ).first
+                        if confirm.is_visible(timeout=1500):
+                            self._human_mouse_to(confirm)
+                            confirm.click(timeout=2000)
+                            self._human_idle(0.5, 1.2)
+                    except Exception:
+                        pass
+                except Exception:
+                    break
+            # Return to the reservation page
+            try:
+                self.page.goto(self.url, wait_until="domcontentloaded", timeout=20000)
+                self._human_idle(1.5, 3.0)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[cart] clear_cart failed (non-fatal): {type(e).__name__}: {e}", flush=True)
+
     def _is_logged_in(self) -> bool:
         # Wait for JS to settle before checking — avoids false negatives from
         # cached DOM showing "Sign In" briefly before session cookies are applied.
@@ -973,6 +1069,14 @@ class CPDBooker:
                 self._human_mouse_to(name_input)
                 name_input.click(timeout=10000)
                 self._human_pause(0.3, 0.7)
+                # Clear any prefilled value before typing. Without this, a prior
+                # run that filled the field but never submitted leaves "Pickleball"
+                # in place, and we end up posting "PickleballPickleball".
+                try:
+                    name_input.press("Control+a", timeout=2000)
+                    name_input.press("Delete", timeout=2000)
+                except Exception:
+                    pass
                 for ch in event_name:
                     name_input.type(ch, delay=random.randint(60, 160))
             except Exception as e:
@@ -1316,6 +1420,14 @@ def main() -> None:
             log("opening browser + logging in")
             booker.login()
             log("login complete")
+            # Verify the fingerprint patches actually applied. If reCAPTCHA keeps
+            # failing despite this output looking right, the score is being
+            # determined by something beyond what we patch (behavioral, IP, or
+            # persisted cookies on the profile).
+            booker.log_fingerprint_diagnostics()
+            # Drop any leftover items in the cart from a prior failed run. A
+            # stale cart inflates the total AND looks bot-shaped at Reserve.
+            booker.clear_cart()
 
             if booker.captcha_visible():
                 log("CAPTCHA detected after login")
