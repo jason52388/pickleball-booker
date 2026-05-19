@@ -577,12 +577,32 @@ class CPDBooker:
         # The date picker is a custom combobox (inputmode="none") — fill() is ignored.
         # Must click to open the calendar popup, navigate months, then click the target day.
         self._dismiss_modal()
+        # The reservation grid renders a loading overlay (.loading-bar__outer-box)
+        # over the page while fetching data. If we click the date picker while it
+        # is still up, the click is intercepted and Playwright times out with the
+        # locator resolved but actionability failing. Wait it out first, same as
+        # login does.
+        try:
+            self.page.locator(".loading-bar__outer-box").wait_for(state="hidden", timeout=15000)
+        except Exception:
+            pass
         # Light pointer activity before touching the date picker — every page
         # visit feeds the reCAPTCHA score, not just the booking flow.
         self._human_idle(0.4, 1.0)
         date_input = self.page.get_by_label("Date picker, current date")
+        date_input.wait_for(state="visible", timeout=15000)
+        try:
+            date_input.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
         self._human_mouse_to(date_input)
-        date_input.click(timeout=10000)
+        try:
+            date_input.click(timeout=10000)
+        except Exception:
+            # Actionability check still failing — fall back to a JS click. This
+            # sacrifices behavioral entropy for this one click, but the calendar
+            # widget is far enough from the Reserve action that the trade is fine.
+            date_input.evaluate("el => el.click()")
         self.page.locator(".an-calendar").wait_for(timeout=5000)
         self._human_idle(0.3, 0.7)
 
