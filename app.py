@@ -344,11 +344,31 @@ class CPDBooker:
 
         # Persistent context reuses cookies/session across runs so reCAPTCHA v3 sees a
         # returning user rather than a fresh bot session.
+        #
+        # ignore_default_args strips Playwright defaults that reCAPTCHA Enterprise
+        # reads:
+        #   --enable-automation sets the "controlled by automated test software"
+        #     infobar flag and exposes signals beyond what
+        #     --disable-blink-features=AutomationControlled patches.
+        #   --enable-features=... with the Playwright-injected feature flags
+        #     differs from a real Chrome's enabled-features set; trimming it lets
+        #     Chrome use its own defaults.
         launch_kwargs = dict(
             headless=headless,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-default-browser-check",
+                "--no-first-run",
+            ],
+            ignore_default_args=[
+                "--enable-automation",
+            ],
             viewport={"width": 1280, "height": 800},
             locale="en-US",
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
         )
 
         proxy_host = os.getenv("ISP_PROXY_HOST")
@@ -375,8 +395,72 @@ class CPDBooker:
                 profile_dir, **launch_kwargs
             )
             print("[browser] launched bundled chromium", flush=True)
+        # Fingerprint patches. reCAPTCHA Enterprise sniffs these directly:
+        #   navigator.webdriver       — must be undefined, not true
+        #   navigator.plugins.length  — headless Chrome has 0; real Chrome has >0
+        #   navigator.languages       — must match Accept-Language and be plural
+        #   window.chrome             — must exist and have runtime/loadTimes
+        #   permissions.query         — automation sometimes returns "denied" by
+        #                              default for Notifications; real Chrome
+        #                              returns "default" until the user chooses
+        #   WebGL renderer            — SwiftShader on a GPU-less VPS leaks
+        #                              "Google SwiftShader"; spoof to a common
+        #                              Intel/Mesa string so it doesn't scream
+        #                              "headless server"
         self.context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            r"""
+            // Hide webdriver
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+            // Spoof a non-empty plugins array
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [
+                    {name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+                    {name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: ''},
+                    {name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: ''},
+                ],
+            });
+
+            // Plural languages
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+
+            // window.chrome must look populated
+            if (!window.chrome) { window.chrome = {}; }
+            window.chrome.runtime = window.chrome.runtime || {};
+            window.chrome.loadTimes = window.chrome.loadTimes || function () { return {}; };
+            window.chrome.csi = window.chrome.csi || function () { return {}; };
+
+            // permissions.query — real Chrome returns "default" for Notification
+            // before any user choice; automation often defaults to "denied".
+            const origQuery = (navigator.permissions && navigator.permissions.query) ? navigator.permissions.query.bind(navigator.permissions) : null;
+            if (origQuery) {
+                navigator.permissions.query = (params) => {
+                    if (params && params.name === 'notifications') {
+                        return Promise.resolve({state: Notification.permission === 'default' ? 'prompt' : Notification.permission});
+                    }
+                    return origQuery(params);
+                };
+            }
+
+            // WebGL vendor/renderer — mask SwiftShader
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function (parameter) {
+                // UNMASKED_VENDOR_WEBGL
+                if (parameter === 37445) return 'Intel Inc.';
+                // UNMASKED_RENDERER_WEBGL
+                if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+                return getParameter.apply(this, [parameter]);
+            };
+            // WebGL2 too
+            if (window.WebGL2RenderingContext) {
+                const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+                WebGL2RenderingContext.prototype.getParameter = function (parameter) {
+                    if (parameter === 37445) return 'Intel Inc.';
+                    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+                    return getParameter2.apply(this, [parameter]);
+                };
+            }
+            """
         )
         self.browser = None  # not needed with persistent context
         self.page = self.context.new_page()
@@ -798,11 +882,18 @@ class CPDBooker:
             "service error",
             "recaptcha verification failed",
             "please re-login",
-            "please re-login",
         ]
-        if any(marker in text for marker in service_error_markers):
-            snippet = re.sub(r"\s+", " ", text)[:500]
-            raise RuntimeError(f"Service Error after Reserve: {snippet}")
+        matched = next((m for m in service_error_markers if m in text), None)
+        if matched:
+            # Surface the matched marker + a window of text around it so we can
+            # tell reCAPTCHA failure apart from generic service errors.
+            idx = text.find(matched)
+            start = max(0, idx - 120)
+            end = min(len(text), idx + len(matched) + 200)
+            window = re.sub(r"\s+", " ", text[start:end])
+            raise RuntimeError(
+                f"Service Error after Reserve [marker='{matched}']: ...{window}..."
+            )
 
     def _find_cvv_input(self, timeout_ms: int = 45000):
         """Find a CVV/CVC/security-code field in any frame, regardless of iframe host."""
