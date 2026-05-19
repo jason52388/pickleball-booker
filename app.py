@@ -353,6 +353,14 @@ class CPDBooker:
         #   --enable-features=... with the Playwright-injected feature flags
         #     differs from a real Chrome's enabled-features set; trimming it lets
         #     Chrome use its own defaults.
+        # On a real desktop machine with a real GPU and residential IP, the
+        # authentic browser fingerprint is *better* than any spoof. UA and WebGL
+        # overrides are only useful on a server (Linux VPS + SwiftShader + no
+        # plugins) where the real fingerprint screams "headless." Toggle via
+        # BROWSER_FINGERPRINT_SPOOF — defaults to off so local runs don't break
+        # things by mismatching their own OS.
+        spoof_fingerprint = os.getenv("BROWSER_FINGERPRINT_SPOOF", "false").lower() == "true"
+
         launch_kwargs = dict(
             headless=headless,
             args=[
@@ -365,11 +373,12 @@ class CPDBooker:
             ],
             viewport={"width": 1280, "height": 800},
             locale="en-US",
-            user_agent=(
+        )
+        if spoof_fingerprint:
+            launch_kwargs["user_agent"] = (
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-            ),
-        )
+            )
 
         proxy_host = os.getenv("ISP_PROXY_HOST")
         proxy_port = os.getenv("ISP_PROXY_PORT")
@@ -407,30 +416,24 @@ class CPDBooker:
         #                              "Google SwiftShader"; spoof to a common
         #                              Intel/Mesa string so it doesn't scream
         #                              "headless server"
+        # Always-safe patches: these only HIDE automation tells. They don't
+        # invent hardware that isn't there, so they're correct on every host.
         self.context.add_init_script(
             r"""
             // Hide webdriver
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 
-            // Spoof a non-empty plugins array
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [
-                    {name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
-                    {name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: ''},
-                    {name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: ''},
-                ],
-            });
-
-            // Plural languages
+            // Plural languages (matches Accept-Language)
             Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
 
-            // window.chrome must look populated
+            // window.chrome must look populated — automation sometimes leaves
+            // these undefined.
             if (!window.chrome) { window.chrome = {}; }
             window.chrome.runtime = window.chrome.runtime || {};
             window.chrome.loadTimes = window.chrome.loadTimes || function () { return {}; };
             window.chrome.csi = window.chrome.csi || function () { return {}; };
 
-            // permissions.query — real Chrome returns "default" for Notification
+            // permissions.query — real Chrome returns "prompt" for Notification
             // before any user choice; automation often defaults to "denied".
             const origQuery = (navigator.permissions && navigator.permissions.query) ? navigator.permissions.query.bind(navigator.permissions) : null;
             if (origQuery) {
@@ -441,27 +444,40 @@ class CPDBooker:
                     return origQuery(params);
                 };
             }
-
-            // WebGL vendor/renderer — mask SwiftShader
-            const getParameter = WebGLRenderingContext.prototype.getParameter;
-            WebGLRenderingContext.prototype.getParameter = function (parameter) {
-                // UNMASKED_VENDOR_WEBGL
-                if (parameter === 37445) return 'Intel Inc.';
-                // UNMASKED_RENDERER_WEBGL
-                if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-                return getParameter.apply(this, [parameter]);
-            };
-            // WebGL2 too
-            if (window.WebGL2RenderingContext) {
-                const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
-                WebGL2RenderingContext.prototype.getParameter = function (parameter) {
-                    if (parameter === 37445) return 'Intel Inc.';
-                    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-                    return getParameter2.apply(this, [parameter]);
-                };
-            }
             """
         )
+
+        # Spoof patches: only safe to apply when the real fingerprint would
+        # otherwise scream "headless server" (no plugins, SwiftShader). On a
+        # real desktop these would mismatch the genuine hardware/OS and look
+        # WORSE. Enable with BROWSER_FINGERPRINT_SPOOF=true on a VPS.
+        if spoof_fingerprint:
+            self.context.add_init_script(
+                r"""
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        {name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format'},
+                        {name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: ''},
+                        {name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: ''},
+                    ],
+                });
+
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function (parameter) {
+                    if (parameter === 37445) return 'Intel Inc.';
+                    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+                    return getParameter.apply(this, [parameter]);
+                };
+                if (window.WebGL2RenderingContext) {
+                    const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+                    WebGL2RenderingContext.prototype.getParameter = function (parameter) {
+                        if (parameter === 37445) return 'Intel Inc.';
+                        if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+                        return getParameter2.apply(this, [parameter]);
+                    };
+                }
+                """
+            )
         self.browser = None  # not needed with persistent context
         self.page = self.context.new_page()
         return self
@@ -1193,7 +1209,20 @@ class CPDBooker:
                 step = "fill CVV"
                 print(f"[book_slot] {step}", flush=True)
                 cvv_input = self._find_cvv_input(timeout_ms=45000)
-                cvv_input.fill(cvv, timeout=10000)
+                # Active Network's payment iframe is from a separate provider
+                # that runs its own bot/fraud signals. fill() sets .value and
+                # dispatches a single input event; per-char type() fires real
+                # keydown/keyup like a human entering a CVV.
+                try:
+                    cvv_input.click(timeout=5000)
+                    self._human_pause(0.3, 0.7)
+                    cvv_input.press("Control+a", timeout=2000)
+                    cvv_input.press("Delete", timeout=2000)
+                except Exception:
+                    pass
+                for ch in cvv:
+                    cvv_input.type(ch, delay=random.randint(80, 200))
+                self._human_idle(0.4, 0.9)
                 self._debug_capture(idx, "after_cvv"); idx += 1
                 step = "click Pay"
                 print(f"[book_slot] {step}", flush=True)
