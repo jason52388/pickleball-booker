@@ -31,6 +31,8 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 BOOKED_WEEKENDS_FILE = DATA_DIR / "booked_weekends.json"
 PENDING_CHOICE_FILE = DATA_DIR / "pending_choice.json"
+WEEKEND_DECISIONS_FILE = DATA_DIR / "weekend_decisions.json"
+PENDING_WEEKEND_FILE = DATA_DIR / "pending_weekend.json"
 
 
 @dataclass
@@ -164,12 +166,25 @@ def send_telegram_photo(photo_path: str, caption: str = "") -> None:
         print(f"[telegram_photo] EXCEPTION: {type(e).__name__}: {e}", flush=True)
 
 
-def send_telegram(message: str, buttons: Optional[List[str]] = None) -> None:
+def send_telegram(
+    message: str,
+    buttons: Optional[List[str]] = None,
+    inline_keyboard: Optional[List[List[Tuple[str, str]]]] = None,
+) -> None:
+    """Send a Telegram message. `inline_keyboard` is a 2D layout of (label,
+    callback_data) tuples; `buttons` is a legacy flat list (one per row)."""
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not chat_id:
         return
     payload: dict = {"chat_id": chat_id, "text": message}
-    if buttons:
+    if inline_keyboard:
+        payload["reply_markup"] = {
+            "inline_keyboard": [
+                [{"text": label, "callback_data": data} for (label, data) in row]
+                for row in inline_keyboard
+            ]
+        }
+    elif buttons:
         payload["reply_markup"] = {
             "inline_keyboard": [[{"text": b, "callback_data": b}] for b in buttons]
         }
@@ -258,12 +273,14 @@ def slot_from_dict(d: dict) -> "Slot":
     )
 
 
-def save_pending_choice(run_id: str, saturday: datetime, sunday: datetime, slots: List["Slot"]) -> None:
+def save_pending_choice(run_id: str, saturday: datetime, sunday: datetime, time_groups: List[List["Slot"]]) -> None:
+    """`time_groups` is a list of lists — each inner list holds Slots that share
+    the same day + start time but cover different courts."""
     write_json_file(PENDING_CHOICE_FILE, {
         "run_id": run_id,
         "saturday": saturday.isoformat(),
         "sunday": sunday.isoformat(),
-        "slots": [slot_to_dict(s) for s in slots],
+        "time_groups": [[slot_to_dict(s) for s in group] for group in time_groups],
     })
 
 
@@ -277,14 +294,69 @@ def clear_pending_choice() -> None:
     PENDING_CHOICE_FILE.unlink(missing_ok=True)
 
 
-def send_slot_options(slots: List["Slot"], header: str) -> None:
-    lines = [header]
-    buttons = []
-    for idx, slot in enumerate(slots, start=1):
-        lines.append(f"{idx}) {format_slot(slot)}")
-        buttons.append(str(idx))
-    buttons.extend(["\U0001f504 Refresh", "N"])
-    send_telegram("\n".join(lines), buttons=buttons)
+def filter_display_slots(slots: List["Slot"]) -> List["Slot"]:
+    """Remove slots outside 7 AM – 7 PM. Falls back to all slots if the filter
+    leaves nothing so we never silently drop every option."""
+    filtered = [s for s in slots if 7 <= s.start.hour < 19]
+    return filtered if filtered else slots
+
+
+def group_slots_by_time(slots: List["Slot"]) -> List[List["Slot"]]:
+    """Bucket slots by (day, start time); each bucket is sorted by court name
+    so the booker tries them in a stable order. Buckets returned sorted by start."""
+    buckets: dict = {}
+    for s in slots:
+        key = (s.day_label, s.start)
+        buckets.setdefault(key, []).append(s)
+    out = []
+    for key in sorted(buckets.keys(), key=lambda k: k[1]):
+        group = sorted(buckets[key], key=lambda s: s.resource_name)
+        out.append(group)
+    return out
+
+
+def _time_group_label(group: List["Slot"]) -> str:
+    first = group[0]
+    return f"{first.day_label[:3]} {first.start.strftime('%-I:%M %p')}"
+
+
+def send_slot_options(time_groups: List[List["Slot"]], header: str, run_id: str = "") -> None:
+    """Send the time-group list as a Telegram inline keyboard. Each callback
+    is self-contained — the slot's ISO timestamp is encoded into the button's
+    callback_data, so tapping any button (even from an older message) is
+    enough to know exactly what to book. No reliance on persisted state.
+
+    The `run_id` parameter is accepted for backwards compatibility but is
+    intentionally not embedded in callbacks anymore."""
+    rows: List[List[Tuple[str, str]]] = []
+    row: List[Tuple[str, str]] = []
+    saturday_iso = ""
+    for group in time_groups:
+        first = group[0]
+        # Track the Saturday of this weekend so REFRESH knows which weekend to
+        # rescrape; derived from any group since they're all in the same weekend.
+        if not saturday_iso:
+            weekday = first.start.weekday()
+            if weekday == 5:  # Saturday itself
+                sat_date = first.start.date()
+            else:  # Sunday
+                sat_date = (first.start - timedelta(days=1)).date()
+            saturday_iso = sat_date.isoformat()
+        callback = f"BOOK_{first.start.isoformat()}"
+        row.append((_time_group_label(group), callback))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        ("🔄 Refresh", f"REFRESH_{saturday_iso}"),
+        ("❌ Dismiss", "SKIP"),
+    ])
+    rows.append([
+        ("⏸ Don't book this weekend", f"DECLINE_{saturday_iso}"),
+    ])
+    send_telegram(header, inline_keyboard=rows)
 
 
 def is_dry_run_enabled() -> bool:
@@ -390,6 +462,23 @@ class CPDBooker:
                 "username": proxy_user,
                 "password": proxy_pass,
             }
+        # Kill any stale Chrome process holding the profile lock so we don't
+        # fall back to bundled Chromium unnecessarily.
+        singleton = Path(profile_dir) / "SingletonLock"
+        if singleton.exists():
+            import subprocess, signal as _signal
+            try:
+                target = os.readlink(str(singleton))  # "<hostname>-<pid>"
+                stale_pid = int(target.split("-")[-1])
+                os.kill(stale_pid, _signal.SIGTERM)
+                import time as _time; _time.sleep(1)
+            except Exception:
+                pass
+            try:
+                singleton.unlink()
+            except Exception:
+                pass
+
         browser_channel = (os.getenv("BROWSER_CHANNEL") or "chrome").strip()
         try:
             print(f"[browser] launching channel={browser_channel!r} headless={headless}", flush=True)
@@ -624,6 +713,18 @@ class CPDBooker:
             return True
 
     def login(self) -> None:
+        last_error: Optional[Exception] = None
+        for outer_attempt in range(3):
+            try:
+                self._login_once()
+                return
+            except Exception as e:
+                last_error = e
+                print(f"[login] outer attempt {outer_attempt+1}/3 failed: {type(e).__name__}: {e}", flush=True)
+                self.page.wait_for_timeout(4000)
+        raise RuntimeError(f"Login failed after 3 attempts. Last error: {last_error}")
+
+    def _login_once(self) -> None:
         for attempt in range(3):
             try:
                 self.page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
@@ -684,6 +785,14 @@ class CPDBooker:
         # Beat between finishing typing and hitting submit — no human goes
         # last-keystroke → click in <100ms.
         self._human_idle(0.6, 1.4)
+        # Save a pre-submit screenshot so we can see what was actually typed
+        # if login fails.
+        try:
+            pre_shot = str(DATA_DIR / f"login_presubmit_{int(time.time())}.png")
+            self.page.screenshot(path=pre_shot, full_page=True)
+            print(f"[login] pre-submit shot={pre_shot}", flush=True)
+        except Exception:
+            pass
         try:
             submit_btn = self.page.get_by_role(
                 "button", name=re.compile(r"sign in|log in", re.I)
@@ -707,6 +816,16 @@ class CPDBooker:
         except Exception:
             pass
         self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
+        # Verify login actually succeeded — silent failures here are why the
+        # poll loop later sees "session expired" two seconds after "login complete".
+        if not self._is_logged_in():
+            try:
+                shot = str(DATA_DIR / f"login_failed_{int(time.time())}.png")
+                self.page.screenshot(path=shot, full_page=True)
+                print(f"[login] failed — Sign In link still visible. shot={shot} url={self.page.url}", flush=True)
+            except Exception:
+                pass
+            raise RuntimeError("Login submit didn't produce a logged-in page (credentials, captcha, or autofill)")
         print("Login complete.", flush=True)
 
     def _dismiss_modal(self) -> None:
@@ -754,9 +873,18 @@ class CPDBooker:
                 # keydown/keypress/keyup at randomized intervals.
                 self._human_mouse_to(locator)
                 locator.click(timeout=10000)
-                self.page.wait_for_timeout(random.randint(150, 400))
-                # Clear any prefilled value first (Ctrl+A, Delete) so we don't
-                # append onto an autofilled string.
+                # Wait for Chrome autofill to fire (it triggers on focus).
+                self.page.wait_for_timeout(random.randint(400, 700))
+                # Multi-layer defeat: (a) JS-clear the value so any autofilled
+                # text is gone; (b) Ctrl+A + Delete to clear any residual
+                # selection / re-autofill; (c) immediately type with no wait
+                # so autofill cannot fire again between clear and type.
+                try:
+                    locator.evaluate(
+                        "el => { el.value = ''; el.dispatchEvent(new Event('input', {bubbles:true})); }"
+                    )
+                except Exception:
+                    pass
                 try:
                     locator.press("Control+a", timeout=2000)
                     locator.press("Delete", timeout=2000)
@@ -799,12 +927,12 @@ class CPDBooker:
             # sacrifices behavioral entropy for this one click, but the calendar
             # widget is far enough from the Reserve action that the trade is fine.
             date_input.evaluate("el => el.click()")
-        self.page.locator(".an-calendar").wait_for(timeout=5000)
+        self.page.locator(".an-calendar").wait_for(timeout=10000)
         self._human_idle(0.3, 0.7)
 
         target_month = target_date.strftime("%B %Y")  # e.g. "May 2026"
         for _ in range(24):
-            header = self.page.locator(".an-calendar-header-title").inner_text(timeout=3000).strip()
+            header = self.page.locator(".an-calendar-header-title").inner_text(timeout=10000).strip()
             if header == target_month:
                 break
             header_date = datetime.strptime(header, "%B %Y")
@@ -1257,6 +1385,41 @@ def upcoming_weekend(reference: datetime) -> Tuple[datetime, datetime]:
     return saturday, sunday
 
 
+def next_booking_weekend(reference: datetime) -> Tuple[datetime, datetime]:
+    """The weekend that the upcoming Sunday cron run will target."""
+    days_until_sunday = (6 - reference.weekday()) % 7
+    next_sunday = reference + timedelta(days=days_until_sunday)
+    return upcoming_weekend(next_sunday)
+
+
+def get_weekend_decision(saturday: datetime, sunday: datetime) -> Optional[str]:
+    """Returns 'confirmed', 'declined', or None."""
+    payload = read_json_file(WEEKEND_DECISIONS_FILE, {})
+    return payload.get(weekend_key(saturday, sunday))
+
+
+def set_weekend_decision(saturday: datetime, sunday: datetime, decision: str) -> None:
+    payload = read_json_file(WEEKEND_DECISIONS_FILE, {})
+    payload[weekend_key(saturday, sunday)] = decision
+    write_json_file(WEEKEND_DECISIONS_FILE, payload)
+
+
+def save_pending_weekend(saturday: datetime, sunday: datetime) -> None:
+    write_json_file(PENDING_WEEKEND_FILE, {
+        "saturday": saturday.isoformat(),
+        "sunday": sunday.isoformat(),
+    })
+
+
+def load_pending_weekend() -> Optional[dict]:
+    return read_json_file(PENDING_WEEKEND_FILE, None)
+
+
+def clear_pending_weekend() -> None:
+    if PENDING_WEEKEND_FILE.exists():
+        PENDING_WEEKEND_FILE.unlink()
+
+
 def choose_auto_book_slot(saturday_slots: List[Slot], sunday_slots: List[Slot]) -> Optional[Slot]:
     sat_pref = [s for s in saturday_slots if is_preferred_time(s)]
     sun_pref = [s for s in sunday_slots if is_preferred_time(s)]
@@ -1413,9 +1576,52 @@ def main() -> None:
     saturday, sunday = upcoming_weekend(now_ct)
     log(f"start mode={mode} target={saturday.date()}/{sunday.date()}")
 
-    # Sunday=6 days before Saturday, Monday=5 days before Saturday.
-    # In dry-run mode always notify so testing works any day (prod only emails Su/Mo).
-    send_no_avail_notification = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
+    # Cron-only weekday gating. Manual/dry/preview runs always proceed.
+    #
+    # The week is split into two phases for any given weekend X:
+    #   • Fri / Sat (8 / 7 days before X) — ASK YES/NO. No booking attempt.
+    #     `next_booking_weekend` returns X here (the weekend whose booking
+    #     window opens on the upcoming Sunday).
+    #   • Sun – Thu (6–2 days before X) — ATTEMPT to book X.
+    #     `upcoming_weekend` returns X here. Decline check applies.
+    # Once declined (Fri/Sat NO or any "Don't book this weekend" tap), all
+    # further activity for that weekend is silent.
+    if is_cron_mode():
+        weekday = now_ct.weekday()  # Mon=0 ... Sun=6
+
+        if weekday in (4, 5):  # Fri or Sat → ASK about next_booking_weekend
+            target_sat, target_sun = next_booking_weekend(now_ct)
+            existing = get_weekend_decision(target_sat, target_sun)
+            if existing == "declined":
+                log(f"end status=skipped reason=user_declined_weekend {target_sat.date()}")
+                return
+            if existing == "confirmed":
+                log(f"end status=already_confirmed weekend={target_sat.date()}")
+                return
+            send_telegram(
+                f"📅 Pickleball booking window opens Sunday for the weekend of "
+                f"{target_sat.strftime('%a %b %-d')} / "
+                f"{target_sun.strftime('%a %b %-d')}.\n\n"
+                f"If you don't reply, I'll start trying to book by default.",
+                inline_keyboard=[[("✅ YES, book it", "WEEK_YES"), ("❌ NO, skip", "WEEK_NO")]],
+            )
+            save_pending_weekend(target_sat, target_sun)
+            log(f"end status=awaiting_confirmation weekend={target_sat.date()}")
+            return
+
+        # Sun – Thu → ATTEMPT booking for upcoming_weekend (6–2 days away).
+        decision = get_weekend_decision(saturday, sunday)
+        if decision == "declined":
+            log(f"end status=skipped reason=user_declined_weekend {saturday.date()}")
+            clear_pending_weekend()
+            return
+        clear_pending_weekend()
+
+    # Cron now runs daily, so always send the fallback slot list when no preferred
+    # slot is found. Email notifications still only fire on Sun/Mon to avoid
+    # spamming an email inbox seven times a week (Telegram is the daily channel).
+    send_email_no_avail = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
+    send_no_avail_notification = True
     if is_test_run():
         # Test runs (dry-run or preview) use a rolling window so they work any time of day.
         deadline_ct = dry_run_poll_deadline_ct(now_ct)
@@ -1425,19 +1631,18 @@ def main() -> None:
         # On-demand manual run: 10-minute window starting now.
         deadline_ct = now_ct + timedelta(minutes=10)
 
-    # Cron heartbeat: prove to the user the script actually fired this morning.
-    # Without this, a silent crash before scraping leaves zero trace in Telegram.
-    if is_cron_mode():
-        send_telegram(
-            f"⏰ Pickleball booker started [{run_id}] — weekend "
-            f"{saturday.strftime('%a %b %-d')}/{sunday.strftime('%a %b %-d')}"
-        )
-
+    # Short-circuit silently if the weekend was already booked on an earlier
+    # cron run. The user already got a "Booked" confirmation + calendar invite
+    # for this weekend — they don't need a heartbeat or "skipped" message
+    # every subsequent run.
     if has_weekend_booking_lock(saturday, sunday):
         log("end status=skipped reason=weekend_already_booked")
-        if is_cron_mode():
-            send_telegram(f"⏭ Pickleball [{run_id}] skipped — weekend already booked.")
         return
+
+    # Daily cron no longer sends a heartbeat — the scrape always ends in either
+    # a booking confirmation, a slot-list message, or a "no slots at all"
+    # message, so the user already gets a signal whenever the cron actually did
+    # work. The heartbeat would just add a 7×/week noise message.
 
     status = "unknown"
     reason = ""
@@ -1480,9 +1685,20 @@ def main() -> None:
             elif not is_cron_mode():
                 deadline_ct = datetime.now(chicago) + timedelta(minutes=10)
 
+            max_polls = 1 if is_test_run() else None
             poll_count = 0
             while datetime.now(chicago) < deadline_ct:
+                if max_polls and poll_count >= max_polls:
+                    break
                 poll_count += 1
+                if not booker._is_logged_in():
+                    try:
+                        shot = str(DATA_DIR / f"logout_{run_id}_p{poll_count}.png")
+                        booker.page.screenshot(path=shot, full_page=True)
+                        log(f"session expired at poll #{poll_count} url={booker.page.url} shot={shot} — re-logging in")
+                    except Exception as _e:
+                        log(f"session expired at poll #{poll_count} — re-logging in (screenshot failed: {_e})")
+                    booker.login()
                 booker.open_target_day(saturday)
                 saturday_slots = booker.scrape_slots(saturday, "Saturday")
                 booker.open_target_day(sunday)
@@ -1522,7 +1738,9 @@ def main() -> None:
                     log("manual run: stopping poll loop — sending fallback options")
                     break
 
-                time.sleep(5)
+                # 5s polls trigger CPD's bot-detection. 20s is well within the
+                # 10-minute cron window (~30 polls) while looking less mechanical.
+                time.sleep(20)
 
             # Save a final state snapshot so we always have something to look at.
             try:
@@ -1541,20 +1759,26 @@ def main() -> None:
     if not booked and status == "unknown":
         status = "no_preferred_slot" if last_all_slots else "no_slots"
 
-    if not booked and send_no_avail_notification and status not in ("captcha", "crashed"):
-        if not is_test_run():
+    if not booked and status not in ("captcha", "crashed"):
+        # Email only on Sun/Mon cron runs (or dry-run testing), never in test mode.
+        if send_email_no_avail and not is_test_run():
             send_no_availability_email(saturday, sunday)
-        if not last_all_slots:
-            send_telegram(
-                f"No pickleball slots found at all for "
-                f"{saturday.strftime('%b %-d')}–{sunday.strftime('%b %-d')}."
-            )
-        else:
-            save_pending_choice(run_id, saturday, sunday, last_all_slots)
-            send_slot_options(
-                last_all_slots,
-                f"No preferred {preferred_hours_display()} slot found. Tap a number to book a fallback, or N to skip:",
-            )
+        # Telegram options: always send when we have a result to surface.
+        send_tg = send_no_avail_notification or (not is_cron_mode() and not is_test_run())
+        if send_tg:
+            if not last_all_slots:
+                send_telegram(
+                    f"No pickleball slots found at all for "
+                    f"{saturday.strftime('%b %-d')}–{sunday.strftime('%b %-d')}."
+                )
+            else:
+                time_groups = group_slots_by_time(filter_display_slots(last_all_slots))
+                save_pending_choice(run_id, saturday, sunday, time_groups)
+                send_slot_options(
+                    time_groups,
+                    f"No preferred {preferred_hours_display()} slot found. Tap a time to book — I'll pick an available court:",
+                    run_id=run_id,
+                )
 
     log(f"end status={status} reason={reason} polls={'n/a' if status == 'crashed' else ''}")
 
