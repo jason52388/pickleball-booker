@@ -166,12 +166,25 @@ def send_telegram_photo(photo_path: str, caption: str = "") -> None:
         print(f"[telegram_photo] EXCEPTION: {type(e).__name__}: {e}", flush=True)
 
 
-def send_telegram(message: str, buttons: Optional[List[str]] = None) -> None:
+def send_telegram(
+    message: str,
+    buttons: Optional[List[str]] = None,
+    inline_keyboard: Optional[List[List[Tuple[str, str]]]] = None,
+) -> None:
+    """Send a Telegram message. `inline_keyboard` is a 2D layout of (label,
+    callback_data) tuples; `buttons` is a legacy flat list (one per row)."""
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not chat_id:
         return
     payload: dict = {"chat_id": chat_id, "text": message}
-    if buttons:
+    if inline_keyboard:
+        payload["reply_markup"] = {
+            "inline_keyboard": [
+                [{"text": label, "callback_data": data} for (label, data) in row]
+                for row in inline_keyboard
+            ]
+        }
+    elif buttons:
         payload["reply_markup"] = {
             "inline_keyboard": [[{"text": b, "callback_data": b}] for b in buttons]
         }
@@ -260,12 +273,14 @@ def slot_from_dict(d: dict) -> "Slot":
     )
 
 
-def save_pending_choice(run_id: str, saturday: datetime, sunday: datetime, slots: List["Slot"]) -> None:
+def save_pending_choice(run_id: str, saturday: datetime, sunday: datetime, time_groups: List[List["Slot"]]) -> None:
+    """`time_groups` is a list of lists — each inner list holds Slots that share
+    the same day + start time but cover different courts."""
     write_json_file(PENDING_CHOICE_FILE, {
         "run_id": run_id,
         "saturday": saturday.isoformat(),
         "sunday": sunday.isoformat(),
-        "slots": [slot_to_dict(s) for s in slots],
+        "time_groups": [[slot_to_dict(s) for s in group] for group in time_groups],
     })
 
 
@@ -280,17 +295,45 @@ def clear_pending_choice() -> None:
 
 
 def filter_display_slots(slots: List["Slot"]) -> List["Slot"]:
-    """Remove slots starting at or after 7 PM — too late to be useful."""
-    filtered = [s for s in slots if s.start.hour < 19]
+    """Remove slots outside 7 AM – 7 PM. Falls back to all slots if the filter
+    leaves nothing so we never silently drop every option."""
+    filtered = [s for s in slots if 7 <= s.start.hour < 19]
     return filtered if filtered else slots
 
 
-def send_slot_options(slots: List["Slot"], header: str) -> None:
-    lines = [header]
-    for idx, slot in enumerate(slots, start=1):
-        lines.append(f"{idx}) {format_slot(slot)}")
-    lines.append("\nReply with a number to book, N to skip, or 'refresh' to update.")
-    send_telegram("\n".join(lines))
+def group_slots_by_time(slots: List["Slot"]) -> List[List["Slot"]]:
+    """Bucket slots by (day, start time); each bucket is sorted by court name
+    so the booker tries them in a stable order. Buckets returned sorted by start."""
+    buckets: dict = {}
+    for s in slots:
+        key = (s.day_label, s.start)
+        buckets.setdefault(key, []).append(s)
+    out = []
+    for key in sorted(buckets.keys(), key=lambda k: k[1]):
+        group = sorted(buckets[key], key=lambda s: s.resource_name)
+        out.append(group)
+    return out
+
+
+def _time_group_label(group: List["Slot"]) -> str:
+    first = group[0]
+    return f"{first.day_label[:3]} {first.start.strftime('%-I:%M %p')}"
+
+
+def send_slot_options(time_groups: List[List["Slot"]], header: str) -> None:
+    """Send the time-group list as a Telegram inline keyboard (one button per
+    unique day+time; court selection is hidden from the user)."""
+    rows: List[List[Tuple[str, str]]] = []
+    row: List[Tuple[str, str]] = []
+    for idx, group in enumerate(time_groups):
+        row.append((_time_group_label(group), f"SLOT_{idx}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([("🔄 Refresh", "REFRESH"), ("❌ Skip", "SKIP")])
+    send_telegram(header, inline_keyboard=rows)
 
 
 def is_dry_run_enabled() -> bool:
@@ -1528,8 +1571,8 @@ def main() -> None:
                 f"📅 Pickleball booking attempt is {day_label} (Sunday morning) for "
                 f"the weekend of {target_sat.strftime('%a %b %-d')} / "
                 f"{target_sun.strftime('%a %b %-d')}.\n\n"
-                f"Reply YES to book that weekend, or NO to skip it. "
-                f"If you don't reply, I'll book by default."
+                f"If you don't reply, I'll book by default.",
+                inline_keyboard=[[("✅ YES, book it", "WEEK_YES"), ("❌ NO, skip", "WEEK_NO")]],
             )
             save_pending_weekend(target_sat, target_sun)
             log(f"end status=awaiting_confirmation weekend={target_sat.date()}")
@@ -1704,11 +1747,11 @@ def main() -> None:
                     f"{saturday.strftime('%b %-d')}–{sunday.strftime('%b %-d')}."
                 )
             else:
-                display_slots = filter_display_slots(last_all_slots)
-                save_pending_choice(run_id, saturday, sunday, display_slots)
+                time_groups = group_slots_by_time(filter_display_slots(last_all_slots))
+                save_pending_choice(run_id, saturday, sunday, time_groups)
                 send_slot_options(
-                    display_slots,
-                    f"No preferred {preferred_hours_display()} slot found. Reply with a number to book a fallback, or N to skip:",
+                    time_groups,
+                    f"No preferred {preferred_hours_display()} slot found. Tap a time to book — I'll pick an available court:",
                 )
 
     log(f"end status={status} reason={reason} polls={'n/a' if status == 'crashed' else ''}")
