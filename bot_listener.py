@@ -13,8 +13,9 @@ load_dotenv()
 
 from app import (
     CPDBooker, Slot,
-    _telegram_api, send_telegram, send_slot_options,
+    _telegram_api, send_telegram, send_slot_options, filter_display_slots,
     load_pending_choice, save_pending_choice, clear_pending_choice,
+    load_pending_weekend, clear_pending_weekend, set_weekend_decision,
     slot_from_dict, slot_to_dict, format_slot,
     send_calendar_invite, set_weekend_booking_lock,
     is_dry_run_enabled, upcoming_weekend,
@@ -104,58 +105,90 @@ def run() -> None:
         for update in resp.get("result", []):
             offset = update["update_id"] + 1
 
-            if "callback_query" not in update:
+            # Accept plain text replies (number, N, refresh)
+            if "message" in update:
+                msg = update["message"]
+                if str(msg.get("from", {}).get("id", "")) != chat_id:
+                    continue
+                text = msg.get("text", "").strip()
+            elif "callback_query" in update:
+                # Acknowledge and ignore stale button taps from old messages
+                cq = update["callback_query"]
+                _telegram_api("answerCallbackQuery", {"callback_query_id": cq["id"]})
+                continue
+            else:
                 continue
 
-            cq = update["callback_query"]
-            if str(cq["from"]["id"]) != chat_id:
+            # Weekend confirmation takes priority — Y/N for slot picking is "N"/digit,
+            # but YES/NO (full words) means weekend confirm.
+            upper = text.upper()
+            pending_weekend = load_pending_weekend()
+            if pending_weekend and upper in ("YES", "Y", "NO"):
+                sat = datetime.fromisoformat(pending_weekend["saturday"])
+                sun = datetime.fromisoformat(pending_weekend["sunday"])
+                if upper in ("YES", "Y"):
+                    set_weekend_decision(sat, sun, "confirmed")
+                    send_telegram(
+                        f"✅ Got it — I'll book for {sat.strftime('%a %b %-d')}/"
+                        f"{sun.strftime('%a %b %-d')} on Sunday morning."
+                    )
+                else:
+                    set_weekend_decision(sat, sun, "declined")
+                    send_telegram(
+                        f"👍 Skipping {sat.strftime('%a %b %-d')}/"
+                        f"{sun.strftime('%a %b %-d')}. I'll ask again about the next weekend."
+                    )
+                clear_pending_weekend()
                 continue
-
-            _telegram_api("answerCallbackQuery", {"callback_query_id": cq["id"]})
-            data = cq["data"].strip()
 
             pending = load_pending_choice()
             if not pending:
-                send_telegram("No active booking request.")
+                send_telegram("That session has expired — run the booker again to see fresh slots.")
                 continue
 
             saturday = datetime.fromisoformat(pending["saturday"])
             sunday = datetime.fromisoformat(pending["sunday"])
 
-            if data == "N":
+            if text.upper() == "N":
                 send_telegram("Skipped — nothing booked.")
                 clear_pending_choice()
 
-            elif data == "\U0001f504 Refresh":
+            elif text.lower() == "refresh":
                 send_telegram("Refreshing available times...")
-                with open_booker() as booker:
-                    slots = refresh_slots(booker, saturday, sunday)
-                    if slots:
-                        pending["slots"] = [slot_to_dict(s) for s in slots]
-                        save_pending_choice(pending["run_id"], saturday, sunday, slots)
-                        send_slot_options(slots, "Updated available times — tap to book:")
-                    else:
-                        send_telegram("No slots available anymore.")
-                        clear_pending_choice()
+                try:
+                    with open_booker() as booker:
+                        slots = refresh_slots(booker, saturday, sunday)
+                        if slots:
+                            display = filter_display_slots(slots)
+                            save_pending_choice(pending["run_id"], saturday, sunday, display)
+                            send_slot_options(display, "Updated available times:")
+                        else:
+                            send_telegram("No slots available anymore.")
+                            clear_pending_choice()
+                except Exception as e:
+                    send_telegram(f"⚠️ Refresh failed: {type(e).__name__}: {str(e)[:300]}")
 
-            elif data.isdigit():
+            elif text.isdigit():
                 slots = [slot_from_dict(s) for s in pending["slots"]]
-                idx = int(data) - 1
+                idx = int(text) - 1
                 if not (0 <= idx < len(slots)):
                     continue
                 picked = slots[idx]
                 send_telegram(f"Checking availability and booking {format_slot(picked)}...")
-                with open_booker() as booker:
-                    leftover = handle_booking(booker, pending, picked)
-                    if leftover is None:
-                        clear_pending_choice()
-                    elif leftover:
-                        pending["slots"] = [slot_to_dict(s) for s in leftover]
-                        save_pending_choice(pending["run_id"], saturday, sunday, leftover)
-                        send_slot_options(leftover, "That slot is no longer available. Updated times:")
-                    else:
-                        send_telegram("That slot is gone and no other slots are available.")
-                        clear_pending_choice()
+                try:
+                    with open_booker() as booker:
+                        leftover = handle_booking(booker, pending, picked)
+                        if leftover is None:
+                            clear_pending_choice()
+                        elif leftover:
+                            display = filter_display_slots(leftover)
+                            save_pending_choice(pending["run_id"], saturday, sunday, display)
+                            send_slot_options(display, "That slot is no longer available. Updated times:")
+                        else:
+                            send_telegram("That slot is gone and no other slots are available.")
+                            clear_pending_choice()
+                except Exception as e:
+                    send_telegram(f"⚠️ Booking failed: {type(e).__name__}: {str(e)[:300]}\nYour slot list is still active — reply with another number or N.")
 
 
 if __name__ == "__main__":
