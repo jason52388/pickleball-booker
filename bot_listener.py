@@ -6,7 +6,7 @@ Managed by systemd — restarts automatically on crash.
 import os
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -53,54 +53,93 @@ def refresh_slots(booker: CPDBooker, saturday: datetime, sunday: datetime) -> Li
     return sorted(sat_slots + sun_slots, key=lambda s: s.start)
 
 
-def handle_booking(booker: CPDBooker, pending: dict, courts: List[Slot]) -> Optional[List[List[Slot]]]:
-    """Try to book any of `courts` (same day+time, different court resources).
-    Returns None on success. Returns fresh time-groups if none of the requested
-    courts are still available."""
-    saturday = datetime.fromisoformat(pending["saturday"])
-    sunday = datetime.fromisoformat(pending["sunday"])
-    run_id = pending["run_id"]
-    first = courts[0]
-    target_date = saturday if first.day_label == "Saturday" else sunday
+def _weekend_for(target_dt: datetime) -> (datetime, datetime):
+    """Return (saturday, sunday) midnight datetimes for the weekend containing
+    `target_dt`. Assumes target_dt's date is a Saturday or Sunday."""
+    weekday = target_dt.weekday()
+    if weekday == 5:  # Saturday
+        sat = target_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        sun = sat + timedelta(days=1)
+    elif weekday == 6:  # Sunday
+        sun = target_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        sat = sun - timedelta(days=1)
+    else:
+        # Best-effort: nearest upcoming weekend
+        days_until_sat = (5 - weekday) % 7
+        sat = (target_dt + timedelta(days=days_until_sat)).replace(hour=0, minute=0, second=0, microsecond=0)
+        sun = sat + timedelta(days=1)
+    return sat, sun
 
-    booker.open_target_day(target_date)
 
-    sat_slots = booker.scrape_slots(saturday, "Saturday")
-    sun_slots = booker.scrape_slots(sunday, "Sunday")
-    current = sorted(sat_slots + sun_slots, key=lambda s: s.start)
+def book_at_time(target_dt: datetime) -> None:
+    """Self-contained booking attempt. Scrape the weekend that `target_dt`
+    falls in, find every court available at that exact start time, try each
+    until one books. If no courts are available at that time (or all fail),
+    send a refreshed time list."""
+    saturday, sunday = _weekend_for(target_dt)
+    pretty = target_dt.strftime("%a %b %-d, %-I:%M %p")
+    send_telegram(f"Trying to book {pretty}…")
 
-    requested = [(c.resource_name, c.start) for c in courts]
-    available_for_time = [
-        s for s in current
-        if (s.resource_name, s.start) in requested
-    ]
+    try:
+        with open_booker() as booker:
+            slots = refresh_slots(booker, saturday, sunday)
+            target_courts = sorted(
+                [s for s in slots if s.start == target_dt],
+                key=lambda s: s.resource_name,
+            )
 
-    if not available_for_time:
-        from app import filter_display_slots as _fds  # avoid name collision
-        return group_slots_by_time(_fds(current))
+            if not target_courts:
+                groups = group_slots_by_time(filter_display_slots(slots))
+                if groups:
+                    send_slot_options(
+                        groups,
+                        f"{pretty} isn't available anymore. Pick from current options:",
+                    )
+                else:
+                    send_telegram(f"{pretty} isn't available, and no other times are open either.")
+                return
 
-    for slot in available_for_time:
-        try:
-            success = booker.book_slot(slot)
-        except Exception as e:
-            send_telegram(f"⚠️ Booking attempt on {slot.resource_name} crashed: {type(e).__name__} — trying next court.")
-            success = False
-        if not success:
-            continue
-        if not is_dry_run_enabled():
-            set_weekend_booking_lock(saturday, sunday, slot, run_id)
-            send_calendar_invite(slot)
-        outcome = "Would book (dry run)" if is_dry_run_enabled() else "Booked"
-        send_telegram(f"{outcome}: {format_slot(slot)}")
-        return None
+            for court in target_courts:
+                try:
+                    success = booker.book_slot(court)
+                except Exception as e:
+                    send_telegram(f"  {court.resource_name}: {type(e).__name__} — trying next court")
+                    continue
+                if not success:
+                    continue
+                if not is_dry_run_enabled():
+                    set_weekend_booking_lock(saturday, sunday, court, "BOT")
+                    send_calendar_invite(court)
+                outcome = "Would book (dry run)" if is_dry_run_enabled() else "Booked"
+                send_telegram(f"✅ {outcome}: {format_slot(court)}")
+                return
 
-    # Tried every available court for this time and all failed.
-    send_telegram(
-        f"Failed to book {first.day_label} {first.start.strftime('%-I:%M %p')} — "
-        f"tried {len(available_for_time)} court(s). Pick another time:"
-    )
-    from app import filter_display_slots as _fds2
-    return group_slots_by_time(_fds2(current))
+            # Every court at this exact time failed.
+            slots = refresh_slots(booker, saturday, sunday)
+            groups = group_slots_by_time(filter_display_slots(slots))
+            if groups:
+                send_slot_options(
+                    groups,
+                    f"Tried {len(target_courts)} court(s) at {pretty} — none succeeded. Pick another:",
+                )
+            else:
+                send_telegram(f"Tried every court at {pretty}; none worked, and no other times are open.")
+    except Exception as e:
+        send_telegram(f"⚠️ Booking failed: {type(e).__name__}: {str(e)[:300]}")
+
+
+def refresh_for_weekend(saturday: datetime, sunday: datetime) -> None:
+    send_telegram("Refreshing available times…")
+    try:
+        with open_booker() as booker:
+            slots = refresh_slots(booker, saturday, sunday)
+            groups = group_slots_by_time(filter_display_slots(slots))
+            if groups:
+                send_slot_options(groups, "Updated available times:")
+            else:
+                send_telegram("No times available for that weekend.")
+    except Exception as e:
+        send_telegram(f"⚠️ Refresh failed: {type(e).__name__}: {str(e)[:300]}")
 
 
 def run() -> None:
@@ -122,32 +161,53 @@ def run() -> None:
         for update in resp.get("result", []):
             offset = update["update_id"] + 1
 
-            # Normalize: accept either button callback_data or plain text reply.
+            # Parse the update. Callbacks are self-contained: BOOK_<iso>,
+            # REFRESH_<sat_date>, SKIP, WEEK_YES, WEEK_NO. Text replies are a
+            # limited fallback (YES/NO for weekend confirmation only).
             command = None
+            target_dt = None
+            target_sat = None
             if "callback_query" in update:
                 cq = update["callback_query"]
                 if str(cq["from"]["id"]) != chat_id:
                     continue
                 _telegram_api("answerCallbackQuery", {"callback_query_id": cq["id"]})
-                command = cq.get("data", "").strip()
+                data = cq.get("data", "").strip()
+                if data == "SKIP":
+                    command = "SKIP"
+                elif data in ("WEEK_YES", "WEEK_NO"):
+                    command = data
+                elif data.startswith("BOOK_"):
+                    try:
+                        target_dt = datetime.fromisoformat(data[5:])
+                        command = "BOOK"
+                    except ValueError:
+                        continue
+                elif data.startswith("REFRESH_"):
+                    try:
+                        target_sat = datetime.fromisoformat(data[8:])
+                        command = "REFRESH"
+                    except ValueError:
+                        continue
+                elif data.startswith("DECLINE_"):
+                    try:
+                        target_sat = datetime.fromisoformat(data[8:])
+                        command = "DECLINE"
+                    except ValueError:
+                        continue
+                else:
+                    continue
             elif "message" in update:
                 msg = update["message"]
                 if str(msg.get("from", {}).get("id", "")) != chat_id:
                     continue
-                text = (msg.get("text") or "").strip()
-                upper = text.upper()
-                if upper in ("YES", "Y"):
+                text = (msg.get("text") or "").strip().upper()
+                if text in ("YES", "Y"):
                     command = "WEEK_YES"
-                elif upper in ("NO",):
+                elif text == "NO":
                     command = "WEEK_NO"
-                elif upper == "N":
-                    command = "SKIP"
-                elif text.lower() == "refresh":
-                    command = "REFRESH"
-                elif text.isdigit():
-                    command = f"SLOT_{int(text) - 1}"
                 else:
-                    continue
+                    continue  # text replies only matter for YES/NO
             else:
                 continue
 
@@ -174,67 +234,27 @@ def run() -> None:
                 clear_pending_weekend()
                 continue
 
-            # ── Slot actions ─────────────────────────────────────────────────
-            pending = load_pending_choice()
-            if not pending:
-                send_telegram("That session has expired — run the booker again to see fresh slots.")
-                continue
-
-            saturday = datetime.fromisoformat(pending["saturday"])
-            sunday = datetime.fromisoformat(pending["sunday"])
-
+            # ── Slot actions (self-contained callbacks; no pending state) ────
             if command == "SKIP":
                 send_telegram("Skipped — nothing booked.")
-                clear_pending_choice()
                 continue
 
             if command == "REFRESH":
-                send_telegram("Refreshing available times...")
-                try:
-                    with open_booker() as booker:
-                        slots = refresh_slots(booker, saturday, sunday)
-                        if slots:
-                            groups = group_slots_by_time(filter_display_slots(slots))
-                            save_pending_choice(pending["run_id"], saturday, sunday, groups)
-                            send_slot_options(groups, "Updated available times:")
-                        else:
-                            send_telegram("No slots available anymore.")
-                            clear_pending_choice()
-                except Exception as e:
-                    send_telegram(f"⚠️ Refresh failed: {type(e).__name__}: {str(e)[:300]}")
+                sun = target_sat + timedelta(days=1)
+                refresh_for_weekend(target_sat, sun)
                 continue
 
-            if command.startswith("SLOT_"):
-                try:
-                    idx = int(command.split("_", 1)[1])
-                except (ValueError, IndexError):
-                    continue
-                groups_raw = pending.get("time_groups") or []
-                if not (0 <= idx < len(groups_raw)):
-                    send_telegram("That option is no longer in the list — try refresh.")
-                    continue
-                courts = [slot_from_dict(d) for d in groups_raw[idx]]
-                first = courts[0]
+            if command == "DECLINE":
+                sun = target_sat + timedelta(days=1)
+                set_weekend_decision(target_sat, sun, "declined")
                 send_telegram(
-                    f"Booking {first.day_label} {first.start.strftime('%-I:%M %p')}… "
-                    f"({len(courts)} court{'s' if len(courts) != 1 else ''} to try)"
+                    f"👍 Got it — won't book for {target_sat.strftime('%a %b %-d')}/"
+                    f"{sun.strftime('%a %b %-d')}. You won't hear about this weekend again."
                 )
-                try:
-                    with open_booker() as booker:
-                        leftover = handle_booking(booker, pending, courts)
-                        if leftover is None:
-                            clear_pending_choice()
-                        elif leftover:
-                            save_pending_choice(pending["run_id"], saturday, sunday, leftover)
-                            send_slot_options(leftover, "Updated available times:")
-                        else:
-                            send_telegram("No other slots are available either.")
-                            clear_pending_choice()
-                except Exception as e:
-                    send_telegram(
-                        f"⚠️ Booking failed: {type(e).__name__}: {str(e)[:300]}\n"
-                        f"Your slot list is still active — tap another time."
-                    )
+                continue
+
+            if command == "BOOK":
+                book_at_time(target_dt)
                 continue
 
 
