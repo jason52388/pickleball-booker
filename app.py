@@ -1576,11 +1576,20 @@ def main() -> None:
     saturday, sunday = upcoming_weekend(now_ct)
     log(f"start mode={mode} target={saturday.date()}/{sunday.date()}")
 
-    # Cron-only weekday gating: ask for confirmation Fri/Sat, book Sun, skip rest.
-    # Manual/dry/preview runs always proceed (testing convenience).
+    # Cron-only weekday gating. Manual/dry/preview runs always proceed.
+    #
+    # The week is split into two phases for any given weekend X:
+    #   • Fri / Sat (8 / 7 days before X) — ASK YES/NO. No booking attempt.
+    #     `next_booking_weekend` returns X here (the weekend whose booking
+    #     window opens on the upcoming Sunday).
+    #   • Sun – Thu (6–2 days before X) — ATTEMPT to book X.
+    #     `upcoming_weekend` returns X here. Decline check applies.
+    # Once declined (Fri/Sat NO or any "Don't book this weekend" tap), all
+    # further activity for that weekend is silent.
     if is_cron_mode():
         weekday = now_ct.weekday()  # Mon=0 ... Sun=6
-        if weekday in (4, 5):  # Fri or Sat
+
+        if weekday in (4, 5):  # Fri or Sat → ASK about next_booking_weekend
             target_sat, target_sun = next_booking_weekend(now_ct)
             existing = get_weekend_decision(target_sat, target_sun)
             if existing == "declined":
@@ -1589,22 +1598,18 @@ def main() -> None:
             if existing == "confirmed":
                 log(f"end status=already_confirmed weekend={target_sat.date()}")
                 return
-            day_label = "two days" if weekday == 4 else "tomorrow"
             send_telegram(
-                f"📅 Pickleball booking attempt is {day_label} (Sunday morning) for "
-                f"the weekend of {target_sat.strftime('%a %b %-d')} / "
+                f"📅 Pickleball booking window opens Sunday for the weekend of "
+                f"{target_sat.strftime('%a %b %-d')} / "
                 f"{target_sun.strftime('%a %b %-d')}.\n\n"
-                f"If you don't reply, I'll book by default.",
+                f"If you don't reply, I'll start trying to book by default.",
                 inline_keyboard=[[("✅ YES, book it", "WEEK_YES"), ("❌ NO, skip", "WEEK_NO")]],
             )
             save_pending_weekend(target_sat, target_sun)
             log(f"end status=awaiting_confirmation weekend={target_sat.date()}")
             return
-        if weekday != 6:  # Not Sunday, not Fri/Sat → nothing to do
-            log(f"end status=skipped reason=non_booking_day weekday={weekday}")
-            return
-        # Sunday — check whether the user declined this weekend. Silent exit:
-        # if you said no, no further Telegram noise about the weekend.
+
+        # Sun – Thu → ATTEMPT booking for upcoming_weekend (6–2 days away).
         decision = get_weekend_decision(saturday, sunday)
         if decision == "declined":
             log(f"end status=skipped reason=user_declined_weekend {saturday.date()}")
@@ -1612,9 +1617,11 @@ def main() -> None:
             return
         clear_pending_weekend()
 
-    # Sunday=6 days before Saturday, Monday=5 days before Saturday.
-    # In dry-run mode always notify so testing works any day (prod only emails Su/Mo).
-    send_no_avail_notification = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
+    # Cron now runs daily, so always send the fallback slot list when no preferred
+    # slot is found. Email notifications still only fire on Sun/Mon to avoid
+    # spamming an email inbox seven times a week (Telegram is the daily channel).
+    send_email_no_avail = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
+    send_no_avail_notification = True
     if is_test_run():
         # Test runs (dry-run or preview) use a rolling window so they work any time of day.
         deadline_ct = dry_run_poll_deadline_ct(now_ct)
@@ -1632,14 +1639,10 @@ def main() -> None:
         log("end status=skipped reason=weekend_already_booked")
         return
 
-    # Cron heartbeat: prove to the user the script actually fired this morning.
-    # Only sent when we're actually about to attempt a booking (after the
-    # weekday gating + lock checks already short-circuited).
-    if is_cron_mode():
-        send_telegram(
-            f"⏰ Pickleball booker started [{run_id}] — weekend "
-            f"{saturday.strftime('%a %b %-d')}/{sunday.strftime('%a %b %-d')}"
-        )
+    # Daily cron no longer sends a heartbeat — the scrape always ends in either
+    # a booking confirmation, a slot-list message, or a "no slots at all"
+    # message, so the user already gets a signal whenever the cron actually did
+    # work. The heartbeat would just add a 7×/week noise message.
 
     status = "unknown"
     reason = ""
@@ -1757,10 +1760,10 @@ def main() -> None:
         status = "no_preferred_slot" if last_all_slots else "no_slots"
 
     if not booked and status not in ("captcha", "crashed"):
-        # Email only on Sun/Mon cron runs (or dry-run testing), never in test/preview mode.
-        if send_no_avail_notification and not is_test_run():
+        # Email only on Sun/Mon cron runs (or dry-run testing), never in test mode.
+        if send_email_no_avail and not is_test_run():
             send_no_availability_email(saturday, sunday)
-        # Telegram options: always on manual non-test runs; on cron only Sun/Mon.
+        # Telegram options: always send when we have a result to surface.
         send_tg = send_no_avail_notification or (not is_cron_mode() and not is_test_run())
         if send_tg:
             if not last_all_slots:
