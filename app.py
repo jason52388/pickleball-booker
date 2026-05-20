@@ -320,19 +320,42 @@ def _time_group_label(group: List["Slot"]) -> str:
     return f"{first.day_label[:3]} {first.start.strftime('%-I:%M %p')}"
 
 
-def send_slot_options(time_groups: List[List["Slot"]], header: str) -> None:
-    """Send the time-group list as a Telegram inline keyboard (one button per
-    unique day+time; court selection is hidden from the user)."""
+def send_slot_options(time_groups: List[List["Slot"]], header: str, run_id: str = "") -> None:
+    """Send the time-group list as a Telegram inline keyboard. Each callback
+    is self-contained — the slot's ISO timestamp is encoded into the button's
+    callback_data, so tapping any button (even from an older message) is
+    enough to know exactly what to book. No reliance on persisted state.
+
+    The `run_id` parameter is accepted for backwards compatibility but is
+    intentionally not embedded in callbacks anymore."""
     rows: List[List[Tuple[str, str]]] = []
     row: List[Tuple[str, str]] = []
-    for idx, group in enumerate(time_groups):
-        row.append((_time_group_label(group), f"SLOT_{idx}"))
+    saturday_iso = ""
+    for group in time_groups:
+        first = group[0]
+        # Track the Saturday of this weekend so REFRESH knows which weekend to
+        # rescrape; derived from any group since they're all in the same weekend.
+        if not saturday_iso:
+            weekday = first.start.weekday()
+            if weekday == 5:  # Saturday itself
+                sat_date = first.start.date()
+            else:  # Sunday
+                sat_date = (first.start - timedelta(days=1)).date()
+            saturday_iso = sat_date.isoformat()
+        callback = f"BOOK_{first.start.isoformat()}"
+        row.append((_time_group_label(group), callback))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    rows.append([("🔄 Refresh", "REFRESH"), ("❌ Skip", "SKIP")])
+    rows.append([
+        ("🔄 Refresh", f"REFRESH_{saturday_iso}"),
+        ("❌ Dismiss", "SKIP"),
+    ])
+    rows.append([
+        ("⏸ Don't book this weekend", f"DECLINE_{saturday_iso}"),
+    ])
     send_telegram(header, inline_keyboard=rows)
 
 
@@ -1580,17 +1603,13 @@ def main() -> None:
         if weekday != 6:  # Not Sunday, not Fri/Sat → nothing to do
             log(f"end status=skipped reason=non_booking_day weekday={weekday}")
             return
-        # Sunday — check whether the user declined this weekend.
+        # Sunday — check whether the user declined this weekend. Silent exit:
+        # if you said no, no further Telegram noise about the weekend.
         decision = get_weekend_decision(saturday, sunday)
         if decision == "declined":
-            send_telegram(
-                f"⏭ Skipping booking for {saturday.strftime('%a %b %-d')}/"
-                f"{sunday.strftime('%a %b %-d')} — you said no."
-            )
             log(f"end status=skipped reason=user_declined_weekend {saturday.date()}")
             clear_pending_weekend()
             return
-        # Clear the confirmation state so it doesn't stick around.
         clear_pending_weekend()
 
     # Sunday=6 days before Saturday, Monday=5 days before Saturday.
@@ -1605,19 +1624,22 @@ def main() -> None:
         # On-demand manual run: 10-minute window starting now.
         deadline_ct = now_ct + timedelta(minutes=10)
 
+    # Short-circuit silently if the weekend was already booked on an earlier
+    # cron run. The user already got a "Booked" confirmation + calendar invite
+    # for this weekend — they don't need a heartbeat or "skipped" message
+    # every subsequent run.
+    if has_weekend_booking_lock(saturday, sunday):
+        log("end status=skipped reason=weekend_already_booked")
+        return
+
     # Cron heartbeat: prove to the user the script actually fired this morning.
-    # Without this, a silent crash before scraping leaves zero trace in Telegram.
+    # Only sent when we're actually about to attempt a booking (after the
+    # weekday gating + lock checks already short-circuited).
     if is_cron_mode():
         send_telegram(
             f"⏰ Pickleball booker started [{run_id}] — weekend "
             f"{saturday.strftime('%a %b %-d')}/{sunday.strftime('%a %b %-d')}"
         )
-
-    if has_weekend_booking_lock(saturday, sunday):
-        log("end status=skipped reason=weekend_already_booked")
-        if is_cron_mode():
-            send_telegram(f"⏭ Pickleball [{run_id}] skipped — weekend already booked.")
-        return
 
     status = "unknown"
     reason = ""
@@ -1660,7 +1682,7 @@ def main() -> None:
             elif not is_cron_mode():
                 deadline_ct = datetime.now(chicago) + timedelta(minutes=10)
 
-            max_polls = 3 if is_test_run() else None
+            max_polls = 1 if is_test_run() else None
             poll_count = 0
             while datetime.now(chicago) < deadline_ct:
                 if max_polls and poll_count >= max_polls:
@@ -1752,6 +1774,7 @@ def main() -> None:
                 send_slot_options(
                     time_groups,
                     f"No preferred {preferred_hours_display()} slot found. Tap a time to book — I'll pick an available court:",
+                    run_id=run_id,
                 )
 
     log(f"end status={status} reason={reason} polls={'n/a' if status == 'crashed' else ''}")
