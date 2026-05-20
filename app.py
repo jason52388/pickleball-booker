@@ -704,6 +704,15 @@ class CPDBooker:
         # Wait for JS to settle before checking — avoids false negatives from
         # cached DOM showing "Sign In" briefly before session cookies are applied.
         self.page.wait_for_timeout(2000)
+        # A "Service Error" modal (e.g. form-token mismatch after submit) leaves
+        # the user technically logged in but with a blocking overlay; treat it
+        # as not-logged-in so the login retry path can clear cookies and recover.
+        try:
+            body_text = self.page.evaluate("document.body.innerText || ''")[:2000].lower()
+            if "service error" in body_text or "form token" in body_text:
+                return False
+        except Exception:
+            pass
         try:
             self.page.get_by_role("link", name=re.compile(r"sign in|log in", re.I)).first.wait_for(
                 state="visible", timeout=3000
@@ -713,16 +722,34 @@ class CPDBooker:
             return True
 
     def login(self) -> None:
+        # Hard 4-minute budget for the whole login including retries. Previous
+        # behavior of "3 attempts no matter how long" once burned an entire
+        # 60-minute cron run waiting on a stuck retry loop.
+        deadline = time.time() + 240
         last_error: Optional[Exception] = None
-        for outer_attempt in range(3):
+        attempt = 0
+        while time.time() < deadline:
+            attempt += 1
             try:
                 self._login_once()
                 return
             except Exception as e:
                 last_error = e
-                print(f"[login] outer attempt {outer_attempt+1}/3 failed: {type(e).__name__}: {e}", flush=True)
-                self.page.wait_for_timeout(4000)
-        raise RuntimeError(f"Login failed after 3 attempts. Last error: {last_error}")
+                msg = f"{type(e).__name__}: {e}"
+                print(f"[login] attempt {attempt} failed: {msg}", flush=True)
+                # Form-token / Service Error / captcha errors usually clear up
+                # after wiping the session cookies and reloading the URL.
+                if any(s in msg.lower() for s in ("form token", "service error", "captcha", "recaptcha")):
+                    self._clear_cookies_for_retry()
+                self.page.wait_for_timeout(3000)
+        raise RuntimeError(f"Login budget (4min) exhausted after {attempt} attempts. Last error: {last_error}")
+
+    def _clear_cookies_for_retry(self) -> None:
+        try:
+            self.context.clear_cookies()
+            print("[login] cookies cleared for retry (stale form-token recovery)", flush=True)
+        except Exception as e:
+            print(f"[login] cookie-clear failed (non-fatal): {e}", flush=True)
 
     def _login_once(self) -> None:
         for attempt in range(3):
@@ -1564,6 +1591,24 @@ def main() -> None:
         ts = datetime.now(chicago).strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] [RUN {run_id}] {msg}", flush=True)
 
+    # Hard 25-minute kill switch. Booking attempts should never run longer than
+    # this — if they do, something is genuinely hung (the May 20 incident was a
+    # 58-minute stuck-login that blew past the cron deadline). SIGALRM only
+    # works on the main thread of POSIX systems, which is fine for our cron.
+    import signal as _signal
+    def _hard_timeout(_sig, _frame):
+        try:
+            send_telegram(f"⏰ Pickleball booker [{run_id}] hit 25-min process timeout — bailing.")
+        except Exception:
+            pass
+        print(f"[ALARM] [RUN {run_id}] hard 25-min process timeout — exiting", flush=True)
+        os._exit(2)
+    try:
+        _signal.signal(_signal.SIGALRM, _hard_timeout)
+        _signal.alarm(25 * 60)
+    except (AttributeError, ValueError):
+        pass  # Windows / non-main-thread — SIGALRM unavailable
+
     if is_dry_run_enabled():
         mode = "dry-run"
     elif is_preview_mode():
@@ -1626,7 +1671,7 @@ def main() -> None:
         # Test runs (dry-run or preview) use a rolling window so they work any time of day.
         deadline_ct = dry_run_poll_deadline_ct(now_ct)
     elif is_cron_mode():
-        deadline_ct = now_ct.replace(hour=7, minute=10, second=0, microsecond=0)
+        deadline_ct = now_ct.replace(hour=7, minute=30, second=0, microsecond=0)
     else:
         # On-demand manual run: 10-minute window starting now.
         deadline_ct = now_ct + timedelta(minutes=10)
