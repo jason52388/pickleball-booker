@@ -722,9 +722,7 @@ class CPDBooker:
             return True
 
     def login(self) -> None:
-        # Hard 4-minute budget for the whole login including retries. Previous
-        # behavior of "3 attempts no matter how long" once burned an entire
-        # 60-minute cron run waiting on a stuck retry loop.
+        # Hard 4-minute budget for the whole login including retries.
         deadline = time.time() + 240
         last_error: Optional[Exception] = None
         attempt = 0
@@ -737,10 +735,12 @@ class CPDBooker:
                 last_error = e
                 msg = f"{type(e).__name__}: {e}"
                 print(f"[login] attempt {attempt} failed: {msg}", flush=True)
-                # Form-token / Service Error / captcha errors usually clear up
-                # after wiping the session cookies and reloading the URL.
-                if any(s in msg.lower() for s in ("form token", "service error", "captcha", "recaptcha")):
-                    self._clear_cookies_for_retry()
+                # Any failure → clear cookies before the next attempt. Stale
+                # session state (form-token mismatch, Service Error modals,
+                # half-applied cookies) is the dominant cause of "Sign In
+                # didn't navigate" and other locator timeouts, and clearing
+                # cookies is cheap, so do it unconditionally on every retry.
+                self._clear_cookies_for_retry()
                 self.page.wait_for_timeout(3000)
         raise RuntimeError(f"Login budget (4min) exhausted after {attempt} attempts. Last error: {last_error}")
 
@@ -768,6 +768,22 @@ class CPDBooker:
             self.page.wait_for_timeout(int(random.uniform(1500, 3000)))
             print("Login complete (session reused).", flush=True)
             return
+        # Not logged in. If the page is showing a Service Error / form-token
+        # error modal, stale cookies are blocking — clear them and reload so
+        # the login form is reachable. This is the proactive equivalent of
+        # the retry-loop cookie clear, applied on first attempt too.
+        try:
+            body = self.page.evaluate("document.body.innerText || ''")[:2000].lower()
+            if "service error" in body or "form token" in body:
+                print("[login] Service Error / form-token on initial page — clearing cookies and reloading", flush=True)
+                self._clear_cookies_for_retry()
+                try:
+                    self.page.goto(self.url, wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+                self.page.wait_for_timeout(1500)
+        except Exception:
+            pass
         self._dismiss_modal()
         # Wait for the loading bar to clear before clicking Sign In.
         try:
