@@ -168,6 +168,32 @@ def test_book_at_time_all_fail_sends_refreshed_options(tmp_state, telegram_captu
     assert "reply_markup" in last  # refreshed options sent
 
 
+def test_book_at_time_skips_when_weekend_already_locked(tmp_state, telegram_capture, monkeypatch):
+    """If the weekend is already booked (cron run or a duplicate button tap),
+    the Telegram BOOK path must NOT scrape or book again — guards against a
+    double-charge."""
+    monkeypatch.delenv("DRY_RUN", raising=False)  # lock is bypassed in dry-run
+    target = datetime(2026, 5, 30, 10, 0)
+    sat, sun = bot_listener._weekend_for(target)
+    # Pre-seed the booking lock for this weekend.
+    app.set_weekend_booking_lock(sat, sun, make_slot("Saturday", target, "Pickleball1A"), "PRIOR")
+
+    booker = MagicMock()
+
+    @bot_listener.contextmanager
+    def fake_open_booker():
+        yield booker
+
+    monkeypatch.setattr(bot_listener, "open_booker", fake_open_booker)
+
+    bot_listener.book_at_time(target)
+
+    booker.scrape_slots.assert_not_called()
+    booker.book_slot.assert_not_called()
+    msgs = [c["payload"]["text"] for c in telegram_capture]
+    assert any("already booked" in m.lower() for m in msgs)
+
+
 def test_book_at_time_exception_falls_through_to_next_court(tmp_state, telegram_capture, monkeypatch):
     """A crash on one court shouldn't poison the rest — keep going."""
     monkeypatch.setenv("DRY_RUN", "true")
