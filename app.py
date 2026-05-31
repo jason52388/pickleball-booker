@@ -6,7 +6,7 @@ import smtplib
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -49,7 +49,15 @@ class Slot:
 
 
 def parse_slot_time(time_label: str, target_date: datetime) -> Optional[Tuple[datetime, Optional[datetime]]]:
-    match = re.search(r"(\d{1,2}:\d{2}\s*[APMapm]{2}).*?(\d{1,2}:\d{2}\s*[APMapm]{2})?", time_label)
+    # Capture the start time, and optionally an end time after a "-" separator.
+    # The end group must be anchored to the separator: a lazy ".*?" before an
+    # optional group always matched empty, so the end time was silently dropped
+    # and every slot looked like it had no end (breaking calendar-invite
+    # durations, which then defaulted to a flat 1 hour).
+    match = re.search(
+        r"(\d{1,2}:\d{2}\s*[APMapm]{2})(?:\s*-\s*(\d{1,2}:\d{2}\s*[APMapm]{2}))?",
+        time_label,
+    )
     if not match:
         return None
     start_str = match.group(1)
@@ -223,57 +231,27 @@ def send_telegram(
 def read_json_file(path: Path, default):
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    # A crash (or the SIGALRM kill switch) mid-write can leave a truncated file.
+    # Treat unreadable/corrupt state as "no state" rather than crashing every
+    # subsequent run.
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[state] {path.name} unreadable ({type(e).__name__}) — using default", flush=True)
+        return default
 
 
 def write_json_file(path: Path, payload) -> None:
-    with path.open("w", encoding="utf-8") as f:
+    # Write to a temp file in the same directory, then atomically replace. This
+    # guarantees readers never see a half-written file even if we're killed
+    # mid-write (25-min SIGALRM kill switch / crash).
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-
-
-def wait_for_telegram_choice(options_count: int, timeout: int = 600) -> Optional[str]:
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    if not chat_id or not token:
-        return None
-
-    # Ignore any updates that arrived before we started waiting
-    resp = _telegram_api("getUpdates", {"limit": 1, "offset": -1})
-    updates = resp.get("result", [])
-    offset = (updates[-1]["update_id"] + 1) if updates else 0
-
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        resp = _telegram_api("getUpdates", {"offset": offset, "timeout": 10})
-        if not resp.get("ok"):
-            time.sleep(5)
-            continue
-        for update in resp.get("result", []):
-            offset = update["update_id"] + 1
-
-            # Button tap
-            if "callback_query" in update:
-                cq = update["callback_query"]
-                if str(cq["from"]["id"]) == str(chat_id):
-                    _telegram_api("answerCallbackQuery", {"callback_query_id": cq["id"]})
-                    data = cq["data"].strip().upper()
-                    if data == "N":
-                        return "N"
-                    if data.isdigit() and 1 <= int(data) <= options_count:
-                        return data
-
-            # Plain text reply
-            elif "message" in update:
-                msg = update["message"]
-                if str(msg["chat"]["id"]) == str(chat_id):
-                    text = (msg.get("text") or "").strip().upper()
-                    if text == "N":
-                        return "N"
-                    if text.isdigit() and 1 <= int(text) <= options_count:
-                        return text
-
-    return None
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def slot_to_dict(slot: "Slot") -> dict:
@@ -422,7 +400,7 @@ def set_weekend_booking_lock(saturday: datetime, sunday: datetime, slot: Slot, r
     payload = read_json_file(BOOKED_WEEKENDS_FILE, {})
     payload[weekend_key(saturday, sunday)] = {
         "run_id": run_id,
-        "booked_at": datetime.utcnow().isoformat() + "Z",
+        "booked_at": datetime.now(timezone.utc).isoformat(),
         "slot": format_slot(slot),
     }
     write_json_file(BOOKED_WEEKENDS_FILE, payload)
@@ -495,7 +473,7 @@ class CPDBooker:
         # fall back to bundled Chromium unnecessarily.
         singleton = Path(profile_dir) / "SingletonLock"
         if singleton.exists():
-            import subprocess, signal as _signal
+            import signal as _signal
             try:
                 target = os.readlink(str(singleton))  # "<hostname>-<pid>"
                 stale_pid = int(target.split("-")[-1])
@@ -1003,10 +981,12 @@ class CPDBooker:
         self._human_idle(0.3, 0.7)
 
         target_ym = (target_date.year, target_date.month)
+        reached_month = False
         for _ in range(24):
             header = self.page.locator(".an-calendar-header-title").inner_text(timeout=10000).strip()
             header_date = parse_calendar_header(header)
             if (header_date.year, header_date.month) == target_ym:
+                reached_month = True
                 break
             arrow = calendar_nav_arrow(header, target_date)
             arrow_loc = self.page.locator(arrow).first
@@ -1014,15 +994,34 @@ class CPDBooker:
             arrow_loc.click()
             self.page.wait_for_timeout(random.randint(280, 620))
 
+        # Fail loudly if month navigation never landed on the target month. The
+        # old code fell through silently and then scraped/booked whatever month
+        # happened to be showing — a layout change must surface as an error, not
+        # a wrong-date booking.
+        if not reached_month:
+            raise RuntimeError(
+                f"Calendar never reached {target_date.strftime('%b %Y')} after 24 steps"
+            )
+
         day_str = str(target_date.day)
         day_cells = self.page.locator(".an-calendar-day:not(.an-calendar-day-othermonth)")
         count = day_cells.count()
+        clicked_day = False
         for i in range(count):
             cell = day_cells.nth(i)
             if cell.inner_text(timeout=1000).strip() == day_str:
                 self._human_mouse_to(cell)
                 cell.click()
+                clicked_day = True
                 break
+
+        # Same rationale: if no in-month cell matched the target day we have not
+        # selected the intended date, so don't let scraping run against the
+        # previously-selected day.
+        if not clicked_day:
+            raise RuntimeError(
+                f"Day cell {day_str} not found in {target_date.strftime('%b %Y')}"
+            )
 
         try:
             self.page.wait_for_load_state("networkidle", timeout=15000)
@@ -1156,10 +1155,22 @@ class CPDBooker:
             self.page.wait_for_timeout(step)
             elapsed += step
 
-    def _debug_capture(self, idx: int, step: str, force: bool = False) -> Optional[str]:
-        """Save a screenshot + page HTML when BOOK_DEBUG=true, or on forced failure."""
+    def _debug_capture(self, idx: int, step: str, force: bool = False, sensitive: bool = False) -> Optional[str]:
+        """Save a screenshot + page HTML when BOOK_DEBUG=true, or on forced failure.
+
+        `sensitive=True` marks the payment/checkout page: a full-page screenshot
+        and HTML dump there would persist the card-on-file and the typed CVV (CVV
+        fields are usually not masked) to disk. On those steps we log only the URL
+        breadcrumb and skip the screenshot + HTML entirely.
+        """
         if not force and os.getenv("BOOK_DEBUG", "false").lower() != "true":
             return
+        if sensitive:
+            try:
+                print(f"[debug] {idx:02d} {step}: {self.page.url} (capture suppressed — payment page)", flush=True)
+            except Exception:
+                pass
+            return None
         debug_dir = DATA_DIR / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^a-z0-9]+", "_", step.lower()).strip("_")
@@ -1247,6 +1258,10 @@ class CPDBooker:
             return True
         step = "start"
         idx = 0
+        # Once we navigate to the checkout/payment page, screenshots and HTML
+        # dumps would capture the card-on-file and CVV. Track that so the failure
+        # handler can suppress sending those to disk / Telegram.
+        self.payment_page_reached = False
         # Wipe prior debug artifacts at the start of a debug run so we only keep
         # the captures from this attempt.
         if os.getenv("BOOK_DEBUG", "false").lower() == "true":
@@ -1375,7 +1390,9 @@ class CPDBooker:
             except Exception:
                 pass
             self._human_pause(2.0, 4.0)
-            self._debug_capture(idx, "after_reserve"); idx += 1
+            # Reserve navigates to the checkout/payment page from here on.
+            self.payment_page_reached = True
+            self._debug_capture(idx, "after_reserve", sensitive=True); idx += 1
             self._raise_if_service_error()
 
             # Preview mode: screenshot the payment page and stop
@@ -1400,7 +1417,7 @@ class CPDBooker:
                     self._human_idle(0.4, 0.9)
                 except Exception:
                     pass
-                self._debug_capture(idx, "after_checkout_waiver"); idx += 1
+                self._debug_capture(idx, "after_checkout_waiver", sensitive=True); idx += 1
 
                 # CVV + Pay are required to complete the booking — let any failure
                 # bubble up so we don't report a successful booking that didn't happen.
@@ -1423,7 +1440,7 @@ class CPDBooker:
                 for ch in cvv:
                     cvv_input.type(ch, delay=random.randint(80, 200))
                 self._human_idle(0.4, 0.9)
-                self._debug_capture(idx, "after_cvv"); idx += 1
+                self._debug_capture(idx, "after_cvv", sensitive=True); idx += 1
                 step = "click Pay"
                 print(f"[book_slot] {step}", flush=True)
                 self._click_any([("role_button", r"^pay$"), ("css", "button[class*='pay']")])
@@ -1432,15 +1449,23 @@ class CPDBooker:
                 except Exception:
                     pass
                 self.page.wait_for_timeout(2000)
-                self._debug_capture(idx, "after_pay"); idx += 1
+                self._debug_capture(idx, "after_pay", sensitive=True); idx += 1
 
             print("[book_slot] done", flush=True)
             return True
         except Exception as e:
             print(f"[book_slot] FAILED at step '{step}': {type(e).__name__}: {e}", flush=True)
-            shot = self._debug_capture(99, f"FAILED_{step}", force=True)
-            if shot:
-                send_telegram_photo(shot, f"Booking failed at {step}: {type(e).__name__}")
+            if getattr(self, "payment_page_reached", False):
+                # On the checkout/payment page — a screenshot would capture card
+                # data. Send a text-only alert instead.
+                send_telegram(
+                    f"Booking failed at '{step}' on the payment page: "
+                    f"{type(e).__name__} (screenshot suppressed to avoid capturing card data)"
+                )
+            else:
+                shot = self._debug_capture(99, f"FAILED_{step}", force=True)
+                if shot:
+                    send_telegram_photo(shot, f"Booking failed at {step}: {type(e).__name__}")
             return False
 
 
@@ -1518,10 +1543,6 @@ def choose_auto_book_slot(saturday_slots: List[Slot], sunday_slots: List[Slot]) 
         return (hour_rank, slot.start, slot.resource_name)
 
     return min(preferred, key=rank)
-
-
-def write_last_run_context(run_id: str) -> None:
-    write_json_file(DATA_DIR / "runtime_state.json", {"last_run_id": run_id, "updated_at": datetime.utcnow().isoformat() + "Z"})
 
 
 def is_cron_mode() -> bool:
@@ -1641,12 +1662,32 @@ def send_no_availability_email(saturday: datetime, sunday: datetime) -> None:
         print(f"send_no_availability_email: failed — {e}")
 
 
+def prune_old_screenshots(max_age_days: int = 7) -> None:
+    """Delete diagnostic PNGs in data/ older than `max_age_days`.
+
+    login_presubmit_*, login_failed_*, logout_*, captcha_*, last_run_* and
+    preview_payment screenshots are written on most runs and were never cleaned
+    up, so they accumulate indefinitely on a long-lived host. Keep a rolling
+    week for debugging and drop the rest. Best-effort — never fatal.
+    """
+    cutoff = time.time() - max_age_days * 86400
+    patterns = ("login_presubmit_*.png", "login_failed_*.png", "logout_*.png",
+                "captcha_*.png", "last_run_*.png")
+    for pattern in patterns:
+        for p in DATA_DIR.glob(pattern):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink()
+            except OSError:
+                pass
+
+
 def main() -> None:
     run_id = uuid.uuid4().hex[:8].upper()
-    write_last_run_context(run_id)
 
     chicago = ZoneInfo("America/Chicago")
     now_ct = datetime.now(chicago)
+    prune_old_screenshots()
 
     def log(msg: str) -> None:
         ts = datetime.now(chicago).strftime("%Y-%m-%d %H:%M:%S")
@@ -1727,7 +1768,6 @@ def main() -> None:
     # slot is found. Email notifications still only fire on Sun/Mon to avoid
     # spamming an email inbox seven times a week (Telegram is the daily channel).
     send_email_no_avail = is_dry_run_enabled() or now_ct.weekday() in (6, 0)
-    send_no_avail_notification = True
     if is_test_run():
         # Test runs (dry-run or preview) use a rolling window so they work any time of day.
         deadline_ct = dry_run_poll_deadline_ct(now_ct)
@@ -1870,21 +1910,19 @@ def main() -> None:
         if send_email_no_avail and not is_test_run():
             send_no_availability_email(saturday, sunday)
         # Telegram options: always send when we have a result to surface.
-        send_tg = send_no_avail_notification or (not is_cron_mode() and not is_test_run())
-        if send_tg:
-            if not last_all_slots:
-                send_telegram(
-                    f"No pickleball slots found at all for "
-                    f"{saturday.strftime('%b %-d')}–{sunday.strftime('%b %-d')}."
-                )
-            else:
-                time_groups = group_slots_by_time(filter_display_slots(last_all_slots))
-                save_pending_choice(run_id, saturday, sunday, time_groups)
-                send_slot_options(
-                    time_groups,
-                    f"No preferred {preferred_hours_display()} slot found. Tap a time to book — I'll pick an available court:",
-                    run_id=run_id,
-                )
+        if not last_all_slots:
+            send_telegram(
+                f"No pickleball slots found at all for "
+                f"{saturday.strftime('%b %-d')}–{sunday.strftime('%b %-d')}."
+            )
+        else:
+            time_groups = group_slots_by_time(filter_display_slots(last_all_slots))
+            save_pending_choice(run_id, saturday, sunday, time_groups)
+            send_slot_options(
+                time_groups,
+                f"No preferred {preferred_hours_display()} slot found. Tap a time to book — I'll pick an available court:",
+                run_id=run_id,
+            )
 
     log(f"end status={status} reason={reason} polls={'n/a' if status == 'crashed' else ''}")
 
