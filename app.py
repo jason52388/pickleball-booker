@@ -5,6 +5,7 @@ import re
 import smtplib
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
@@ -254,6 +255,55 @@ def write_json_file(path: Path, payload) -> None:
     os.replace(tmp, path)
 
 
+try:
+    import fcntl  # POSIX only; the bot runs on Linux/macOS
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
+
+
+@contextmanager
+def _file_lock(path: Path):
+    """Hold an exclusive cross-process lock for the duration of the block.
+
+    The cron job (daily_runner) and the long-running bot_listener both
+    read-modify-write the same state files (booked_weekends.json,
+    weekend_decisions.json). Without serialization, two processes can each read
+    the old dict and the second write clobbers the first — a lost booking lock
+    (→ double-book/double-charge) or a lost decline. We lock a sidecar ".lock"
+    file rather than the data file itself, so the lock survives the os.replace()
+    that swaps the data file's inode.
+
+    Best-effort: if fcntl is unavailable (Windows), this is a no-op and behavior
+    falls back to the prior unlocked path.
+    """
+    if fcntl is None:  # pragma: no cover - Windows
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with open(lock_path, "w") as lock_f:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+
+def update_json_file(path: Path, mutate, default):
+    """Atomically read-modify-write a JSON file under an exclusive lock.
+
+    `mutate(payload)` receives the current contents (or `default` if absent /
+    corrupt) and returns the new contents to persist. The read, the mutation,
+    and the write all happen while holding the lock, so concurrent updaters
+    can't lose each other's keys.
+    """
+    with _file_lock(path):
+        payload = read_json_file(path, default)
+        new_payload = mutate(payload)
+        write_json_file(path, new_payload)
+    return new_payload
+
+
 def slot_to_dict(slot: "Slot") -> dict:
     return {
         "day_label": slot.day_label,
@@ -397,13 +447,19 @@ def has_weekend_booking_lock(saturday: datetime, sunday: datetime) -> bool:
 def set_weekend_booking_lock(saturday: datetime, sunday: datetime, slot: Slot, run_id: str) -> None:
     if not is_weekend_lock_enabled() or is_dry_run_enabled():
         return
-    payload = read_json_file(BOOKED_WEEKENDS_FILE, {})
-    payload[weekend_key(saturday, sunday)] = {
+    entry = {
         "run_id": run_id,
         "booked_at": datetime.now(timezone.utc).isoformat(),
         "slot": format_slot(slot),
     }
-    write_json_file(BOOKED_WEEKENDS_FILE, payload)
+
+    def _mutate(payload):
+        payload[weekend_key(saturday, sunday)] = entry
+        return payload
+
+    # Locked read-modify-write: cron and bot_listener can both reach this for
+    # the same weekend, and a lost update here means a double-booking.
+    update_json_file(BOOKED_WEEKENDS_FILE, _mutate, {})
 
 
 
@@ -1496,9 +1552,13 @@ def get_weekend_decision(saturday: datetime, sunday: datetime) -> Optional[str]:
 
 
 def set_weekend_decision(saturday: datetime, sunday: datetime, decision: str) -> None:
-    payload = read_json_file(WEEKEND_DECISIONS_FILE, {})
-    payload[weekend_key(saturday, sunday)] = decision
-    write_json_file(WEEKEND_DECISIONS_FILE, payload)
+    def _mutate(payload):
+        payload[weekend_key(saturday, sunday)] = decision
+        return payload
+
+    # Locked: the bot_listener writes confirmed/declined here while a cron run
+    # may read it; serialize so a decline can't be lost to a racing write.
+    update_json_file(WEEKEND_DECISIONS_FILE, _mutate, {})
 
 
 def save_pending_weekend(saturday: datetime, sunday: datetime) -> None:
