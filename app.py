@@ -223,13 +223,27 @@ def send_telegram(
 def read_json_file(path: Path, default):
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    # A crash (or the SIGALRM kill switch) mid-write can leave a truncated file.
+    # Treat unreadable/corrupt state as "no state" rather than crashing every
+    # subsequent run.
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[state] {path.name} unreadable ({type(e).__name__}) — using default", flush=True)
+        return default
 
 
 def write_json_file(path: Path, payload) -> None:
-    with path.open("w", encoding="utf-8") as f:
+    # Write to a temp file in the same directory, then atomically replace. This
+    # guarantees readers never see a half-written file even if we're killed
+    # mid-write (25-min SIGALRM kill switch / crash).
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def wait_for_telegram_choice(options_count: int, timeout: int = 600) -> Optional[str]:
@@ -1156,10 +1170,22 @@ class CPDBooker:
             self.page.wait_for_timeout(step)
             elapsed += step
 
-    def _debug_capture(self, idx: int, step: str, force: bool = False) -> Optional[str]:
-        """Save a screenshot + page HTML when BOOK_DEBUG=true, or on forced failure."""
+    def _debug_capture(self, idx: int, step: str, force: bool = False, sensitive: bool = False) -> Optional[str]:
+        """Save a screenshot + page HTML when BOOK_DEBUG=true, or on forced failure.
+
+        `sensitive=True` marks the payment/checkout page: a full-page screenshot
+        and HTML dump there would persist the card-on-file and the typed CVV (CVV
+        fields are usually not masked) to disk. On those steps we log only the URL
+        breadcrumb and skip the screenshot + HTML entirely.
+        """
         if not force and os.getenv("BOOK_DEBUG", "false").lower() != "true":
             return
+        if sensitive:
+            try:
+                print(f"[debug] {idx:02d} {step}: {self.page.url} (capture suppressed — payment page)", flush=True)
+            except Exception:
+                pass
+            return None
         debug_dir = DATA_DIR / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
         safe = re.sub(r"[^a-z0-9]+", "_", step.lower()).strip("_")
@@ -1247,6 +1273,10 @@ class CPDBooker:
             return True
         step = "start"
         idx = 0
+        # Once we navigate to the checkout/payment page, screenshots and HTML
+        # dumps would capture the card-on-file and CVV. Track that so the failure
+        # handler can suppress sending those to disk / Telegram.
+        self.payment_page_reached = False
         # Wipe prior debug artifacts at the start of a debug run so we only keep
         # the captures from this attempt.
         if os.getenv("BOOK_DEBUG", "false").lower() == "true":
@@ -1375,7 +1405,9 @@ class CPDBooker:
             except Exception:
                 pass
             self._human_pause(2.0, 4.0)
-            self._debug_capture(idx, "after_reserve"); idx += 1
+            # Reserve navigates to the checkout/payment page from here on.
+            self.payment_page_reached = True
+            self._debug_capture(idx, "after_reserve", sensitive=True); idx += 1
             self._raise_if_service_error()
 
             # Preview mode: screenshot the payment page and stop
@@ -1400,7 +1432,7 @@ class CPDBooker:
                     self._human_idle(0.4, 0.9)
                 except Exception:
                     pass
-                self._debug_capture(idx, "after_checkout_waiver"); idx += 1
+                self._debug_capture(idx, "after_checkout_waiver", sensitive=True); idx += 1
 
                 # CVV + Pay are required to complete the booking — let any failure
                 # bubble up so we don't report a successful booking that didn't happen.
@@ -1423,7 +1455,7 @@ class CPDBooker:
                 for ch in cvv:
                     cvv_input.type(ch, delay=random.randint(80, 200))
                 self._human_idle(0.4, 0.9)
-                self._debug_capture(idx, "after_cvv"); idx += 1
+                self._debug_capture(idx, "after_cvv", sensitive=True); idx += 1
                 step = "click Pay"
                 print(f"[book_slot] {step}", flush=True)
                 self._click_any([("role_button", r"^pay$"), ("css", "button[class*='pay']")])
@@ -1432,15 +1464,23 @@ class CPDBooker:
                 except Exception:
                     pass
                 self.page.wait_for_timeout(2000)
-                self._debug_capture(idx, "after_pay"); idx += 1
+                self._debug_capture(idx, "after_pay", sensitive=True); idx += 1
 
             print("[book_slot] done", flush=True)
             return True
         except Exception as e:
             print(f"[book_slot] FAILED at step '{step}': {type(e).__name__}: {e}", flush=True)
-            shot = self._debug_capture(99, f"FAILED_{step}", force=True)
-            if shot:
-                send_telegram_photo(shot, f"Booking failed at {step}: {type(e).__name__}")
+            if getattr(self, "payment_page_reached", False):
+                # On the checkout/payment page — a screenshot would capture card
+                # data. Send a text-only alert instead.
+                send_telegram(
+                    f"Booking failed at '{step}' on the payment page: "
+                    f"{type(e).__name__} (screenshot suppressed to avoid capturing card data)"
+                )
+            else:
+                shot = self._debug_capture(99, f"FAILED_{step}", force=True)
+                if shot:
+                    send_telegram_photo(shot, f"Booking failed at {step}: {type(e).__name__}")
             return False
 
 

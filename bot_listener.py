@@ -18,7 +18,7 @@ from app import (
     load_pending_choice, save_pending_choice, clear_pending_choice,
     load_pending_weekend, clear_pending_weekend, set_weekend_decision,
     slot_from_dict, slot_to_dict, format_slot,
-    send_calendar_invite, set_weekend_booking_lock,
+    send_calendar_invite, set_weekend_booking_lock, has_weekend_booking_lock,
     is_dry_run_enabled, upcoming_weekend,
 )
 from typing import Iterator, List, Optional
@@ -78,6 +78,19 @@ def book_at_time(target_dt: datetime) -> None:
     send a refreshed time list."""
     saturday, sunday = _weekend_for(target_dt)
     pretty = target_dt.strftime("%a %b %-d, %-I:%M %p")
+
+    # Guard against double-booking (and double-charging): a cron run, or an
+    # earlier tap of this same button, may already have booked + paid for this
+    # weekend. main() checks this lock before every cron attempt; the Telegram
+    # BOOK path must do the same. (Returns False in dry-run / when the lock is
+    # disabled, so those modes still proceed.)
+    if has_weekend_booking_lock(saturday, sunday):
+        send_telegram(
+            f"That weekend ({saturday.strftime('%a %b %-d')}/"
+            f"{sunday.strftime('%a %b %-d')}) is already booked — not booking again."
+        )
+        return
+
     send_telegram(f"Trying to book {pretty}…")
 
     try:
