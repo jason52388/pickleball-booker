@@ -61,6 +61,17 @@ def parse_slot_time(time_label: str, target_date: datetime) -> Optional[Tuple[da
     return start, end
 
 
+def calendar_nav_arrow(header_text: str, target_date: datetime) -> str:
+    """Chevron selector to step the month picker toward `target_date`.
+
+    The header parses to a naive datetime; `target_date` may be tz-aware (it
+    flows from datetime.now(chicago)), so compare tz-naively to avoid a
+    naive/aware TypeError when navigating across a month boundary."""
+    header_date = datetime.strptime(header_text, "%B %Y")
+    target_naive = target_date.replace(tzinfo=None)
+    return ".icon-chevron-right" if header_date < target_naive else ".icon-chevron-left"
+
+
 def is_valid_pickleball_slot(label: str) -> bool:
     include = os.getenv("PICKLEBALL_INCLUDE", "pickleball").lower()
     exclude = os.getenv("PICKLEBALL_EXCLUDE", "ball machine").lower()
@@ -983,8 +994,7 @@ class CPDBooker:
             header = self.page.locator(".an-calendar-header-title").inner_text(timeout=10000).strip()
             if header == target_month:
                 break
-            header_date = datetime.strptime(header, "%B %Y")
-            arrow = ".icon-chevron-right" if header_date < target_date else ".icon-chevron-left"
+            arrow = calendar_nav_arrow(header, target_date)
             arrow_loc = self.page.locator(arrow).first
             self._human_mouse_to(arrow_loc, settle_ms=(80, 220))
             arrow_loc.click()
