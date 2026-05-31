@@ -122,11 +122,16 @@ def _telegram_api(method: str, payload: dict) -> dict:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     if not token:
         return {}
+    # For long-poll getUpdates the payload carries a server-side `timeout`
+    # (seconds Telegram holds the connection open). The HTTP read timeout must
+    # exceed it, or requests aborts the poll before Telegram replies.
+    poll_timeout = payload.get("timeout", 0)
+    http_timeout = poll_timeout + 15 if poll_timeout else 15
     try:
         r = http_requests.post(
             f"https://api.telegram.org/bot{token}/{method}",
             json=payload,
-            timeout=15,
+            timeout=http_timeout,
         )
         return r.json()
     except Exception:
