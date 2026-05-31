@@ -1468,16 +1468,32 @@ def clear_pending_weekend() -> None:
         PENDING_WEEKEND_FILE.unlink()
 
 
+def preferred_hour_priority() -> List[int]:
+    """Start hours to prefer within the preferred window, best first.
+
+    Defaults to 10am → 9am → 8am. Hours in the preferred window but absent from
+    this list (e.g. 11am) rank after every listed hour, so they're only booked
+    when nothing better is open."""
+    raw = os.getenv("PREFERRED_HOUR_PRIORITY", "10,9,8")
+    return [int(p) for p in raw.split(",") if p.strip().lstrip("-").isdigit()]
+
+
 def choose_auto_book_slot(saturday_slots: List[Slot], sunday_slots: List[Slot]) -> Optional[Slot]:
-    sat_pref = [s for s in saturday_slots if is_preferred_time(s)]
-    sun_pref = [s for s in sunday_slots if is_preferred_time(s)]
-    if sat_pref and sun_pref:
-        return sat_pref[0]
-    if sat_pref:
-        return sat_pref[0]
-    if sun_pref:
-        return sun_pref[0]
-    return None
+    priority = preferred_hour_priority()
+    preferred = [s for s in (saturday_slots + sunday_slots) if is_preferred_time(s)]
+    if not preferred:
+        return None
+
+    def rank(slot: Slot) -> tuple:
+        try:
+            hour_rank = priority.index(slot.start.hour)
+        except ValueError:
+            hour_rank = len(priority)
+        # Secondary key keeps Saturday before Sunday (earlier absolute start)
+        # and gives a stable court order within the same hour.
+        return (hour_rank, slot.start, slot.resource_name)
+
+    return min(preferred, key=rank)
 
 
 def write_last_run_context(run_id: str) -> None:
