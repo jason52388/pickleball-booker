@@ -34,3 +34,19 @@ def test_naive_target_still_works():
 def test_crosses_year_boundary_forward():
     target = datetime(2027, 1, 3, tzinfo=CHICAGO)
     assert app.calendar_nav_arrow("December 2026", target) == ".icon-chevron-right"
+
+
+def test_abbreviated_header_is_accepted():
+    # Regression: the live widget renders "Jun 2026", which %B (full name)
+    # rejected. Both abbreviated and full forms must parse.
+    target = datetime(2026, 6, 6, tzinfo=CHICAGO)
+    assert app.calendar_nav_arrow("May 2026", target) == ".icon-chevron-right"
+    assert app.calendar_nav_arrow("Jul 2026", target) == ".icon-chevron-left"
+    assert app.parse_calendar_header("Jun 2026").month == 6
+    assert app.parse_calendar_header("June 2026").month == 6
+
+
+def test_unrecognized_header_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        app.parse_calendar_header("not a month")

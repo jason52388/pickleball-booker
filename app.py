@@ -61,13 +61,26 @@ def parse_slot_time(time_label: str, target_date: datetime) -> Optional[Tuple[da
     return start, end
 
 
+def parse_calendar_header(header_text: str) -> datetime:
+    """Parse the month-picker header to a naive datetime (first of month).
+
+    The widget renders abbreviated month names ("Jun 2026"), but accept full
+    names ("June 2026") too in case the rendering ever changes."""
+    for fmt in ("%b %Y", "%B %Y"):
+        try:
+            return datetime.strptime(header_text, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Unrecognized calendar header: {header_text!r}")
+
+
 def calendar_nav_arrow(header_text: str, target_date: datetime) -> str:
     """Chevron selector to step the month picker toward `target_date`.
 
     The header parses to a naive datetime; `target_date` may be tz-aware (it
     flows from datetime.now(chicago)), so compare tz-naively to avoid a
     naive/aware TypeError when navigating across a month boundary."""
-    header_date = datetime.strptime(header_text, "%B %Y")
+    header_date = parse_calendar_header(header_text)
     target_naive = target_date.replace(tzinfo=None)
     return ".icon-chevron-right" if header_date < target_naive else ".icon-chevron-left"
 
@@ -989,10 +1002,11 @@ class CPDBooker:
         self.page.locator(".an-calendar").wait_for(timeout=10000)
         self._human_idle(0.3, 0.7)
 
-        target_month = target_date.strftime("%B %Y")  # e.g. "May 2026"
+        target_ym = (target_date.year, target_date.month)
         for _ in range(24):
             header = self.page.locator(".an-calendar-header-title").inner_text(timeout=10000).strip()
-            if header == target_month:
+            header_date = parse_calendar_header(header)
+            if (header_date.year, header_date.month) == target_ym:
                 break
             arrow = calendar_nav_arrow(header, target_date)
             arrow_loc = self.page.locator(arrow).first
