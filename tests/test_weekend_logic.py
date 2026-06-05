@@ -63,6 +63,30 @@ def test_decisions_isolated_per_weekend(tmp_state):
     assert app.get_weekend_decision(sat2, sun2) == "declined"
 
 
+def test_set_and_get_decision_day_choices(tmp_state):
+    sat = datetime(2026, 5, 30)
+    sun = datetime(2026, 5, 31)
+    for choice in ("sat", "sun", "both"):
+        app.set_weekend_decision(sat, sun, choice)
+        assert app.get_weekend_decision(sat, sun) == choice
+
+
+def test_weekend_book_days_single_day():
+    assert app.weekend_book_days("sat") == {"Saturday"}
+    assert app.weekend_book_days("sun") == {"Sunday"}
+
+
+def test_weekend_book_days_both():
+    assert app.weekend_book_days("both") == {"Saturday", "Sunday"}
+
+
+def test_weekend_book_days_legacy_and_default_book_both():
+    # Legacy 'confirmed' decisions and no-reply (None) both fall back to booking
+    # the full weekend.
+    assert app.weekend_book_days("confirmed") == {"Saturday", "Sunday"}
+    assert app.weekend_book_days(None) == {"Saturday", "Sunday"}
+
+
 def test_pending_weekend_roundtrip(tmp_state):
     sat = datetime(2026, 5, 30)
     sun = datetime(2026, 5, 31)
