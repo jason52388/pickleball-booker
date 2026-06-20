@@ -1546,9 +1546,30 @@ def next_booking_weekend(reference: datetime) -> Tuple[datetime, datetime]:
 
 
 def get_weekend_decision(saturday: datetime, sunday: datetime) -> Optional[str]:
-    """Returns 'confirmed', 'declined', or None."""
+    """Returns a decision string or None.
+
+    Values: 'declined' (skip), 'confirmed_sat'/'confirmed_sun' (book that day
+    only), or 'confirmed' (either day — also the legacy 'YES' value)."""
     payload = read_json_file(WEEKEND_DECISIONS_FILE, {})
     return payload.get(weekend_key(saturday, sunday))
+
+
+def is_confirmed_decision(decision: Optional[str]) -> bool:
+    """True for any confirmed variant (specific day or either)."""
+    return bool(decision) and decision != "declined"
+
+
+def confirmed_booking_days(decision: Optional[str]) -> Tuple[str, ...]:
+    """Day labels eligible for booking given a stored weekend decision.
+
+    'confirmed_sat'/'confirmed_sun' restrict to a single day. 'confirmed'
+    (Either), None (no reply — book by default), and any legacy value allow
+    both days. 'declined' never reaches here (main() returns earlier)."""
+    if decision == "confirmed_sat":
+        return ("Saturday",)
+    if decision == "confirmed_sun":
+        return ("Sunday",)
+    return ("Saturday", "Sunday")
 
 
 def set_weekend_decision(saturday: datetime, sunday: datetime, decision: str) -> None:
@@ -1580,10 +1601,10 @@ def clear_pending_weekend() -> None:
 def preferred_hour_priority() -> List[int]:
     """Start hours to prefer within the preferred window, best first.
 
-    Defaults to 10am → 9am → 8am. Hours in the preferred window but absent from
-    this list (e.g. 11am) rank after every listed hour, so they're only booked
+    Defaults to 10am → 9am → 11am → 8am. Hours in the preferred window but
+    absent from this list rank after every listed hour, so they're only booked
     when nothing better is open."""
-    raw = os.getenv("PREFERRED_HOUR_PRIORITY", "10,9,8")
+    raw = os.getenv("PREFERRED_HOUR_PRIORITY", "10,9,11,8")
     return [int(p) for p in raw.split(",") if p.strip().lstrip("-").isdigit()]
 
 
@@ -1783,6 +1804,11 @@ def main() -> None:
     saturday, sunday = upcoming_weekend(now_ct)
     log(f"start mode={mode} target={saturday.date()}/{sunday.date()}")
 
+    # Which day(s) to actually book. Default both; the cron Sun–Thu phase
+    # narrows this to whatever the user picked on the Fri/Sat prompt. Manual,
+    # dry-run, and preview runs stay day-agnostic (book whichever is best).
+    booking_days: Tuple[str, ...] = ("Saturday", "Sunday")
+
     # Cron-only weekday gating. Manual/dry/preview runs always proceed.
     #
     # The week is split into two phases for any given weekend X:
@@ -1802,15 +1828,18 @@ def main() -> None:
             if existing == "declined":
                 log(f"end status=skipped reason=user_declined_weekend {target_sat.date()}")
                 return
-            if existing == "confirmed":
-                log(f"end status=already_confirmed weekend={target_sat.date()}")
+            if is_confirmed_decision(existing):
+                log(f"end status=already_confirmed={existing} weekend={target_sat.date()}")
                 return
             send_telegram(
                 f"📅 Pickleball booking window opens Sunday for the weekend of "
                 f"{target_sat.strftime('%a %b %-d')} / "
                 f"{target_sun.strftime('%a %b %-d')}.\n\n"
-                f"If you don't reply, I'll start trying to book by default.",
-                inline_keyboard=[[("✅ YES, book it", "WEEK_YES"), ("❌ NO, skip", "WEEK_NO")]],
+                f"Which day should I book? If you don't reply, I'll try either day by default.",
+                inline_keyboard=[
+                    [("🗓 Saturday", "WEEK_SAT"), ("🗓 Sunday", "WEEK_SUN")],
+                    [("👍 Either", "WEEK_EITHER"), ("❌ Skip", "WEEK_NO")],
+                ],
             )
             save_pending_weekend(target_sat, target_sun)
             log(f"end status=awaiting_confirmation weekend={target_sat.date()}")
@@ -1822,6 +1851,9 @@ def main() -> None:
             log(f"end status=skipped reason=user_declined_weekend {saturday.date()}")
             clear_pending_weekend()
             return
+        booking_days = confirmed_booking_days(decision)
+        if booking_days != ("Saturday", "Sunday"):
+            log(f"day constraint: only booking {booking_days[0]} (decision={decision})")
         clear_pending_weekend()
 
     # Cron now runs daily, so always send the fallback slot list when no preferred
@@ -1905,10 +1937,19 @@ def main() -> None:
                     except Exception as _e:
                         log(f"session expired at poll #{poll_count} — re-logging in (screenshot failed: {_e})")
                     booker.login()
-                booker.open_target_day(saturday)
-                saturday_slots = booker.scrape_slots(saturday, "Saturday")
-                booker.open_target_day(sunday)
-                sunday_slots = booker.scrape_slots(sunday, "Sunday")
+                # Only scrape the day(s) the user opted into. Skipping the other
+                # day avoids a wasted calendar navigation each poll and keeps it
+                # out of the auto-book pick and the fallback options list.
+                if "Saturday" in booking_days:
+                    booker.open_target_day(saturday)
+                    saturday_slots = booker.scrape_slots(saturday, "Saturday")
+                else:
+                    saturday_slots = []
+                if "Sunday" in booking_days:
+                    booker.open_target_day(sunday)
+                    sunday_slots = booker.scrape_slots(sunday, "Sunday")
+                else:
+                    sunday_slots = []
                 last_all_slots = sorted(saturday_slots + sunday_slots, key=lambda s: s.start)
                 pref_count = sum(1 for s in last_all_slots if is_preferred_time(s))
                 log(
