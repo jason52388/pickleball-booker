@@ -13,6 +13,21 @@ import app
 import bot_listener
 
 
+def test_weekend_commands_map_to_decisions():
+    """The four Fri/Sat buttons (plus the legacy YES) store the right decision,
+    and any day-specific decision round-trips through confirmed_booking_days."""
+    wc = bot_listener.WEEKEND_COMMANDS
+    assert wc["WEEK_SAT"] == ("confirmed_sat", "Saturday")
+    assert wc["WEEK_SUN"] == ("confirmed_sun", "Sunday")
+    assert wc["WEEK_EITHER"] == ("confirmed", None)
+    assert wc["WEEK_NO"] == ("declined", None)
+    assert wc["WEEK_YES"] == ("confirmed", None)  # backward compatible
+    # The stored decisions resolve to the expected booking days.
+    assert app.confirmed_booking_days(wc["WEEK_SAT"][0]) == ("Saturday",)
+    assert app.confirmed_booking_days(wc["WEEK_SUN"][0]) == ("Sunday",)
+    assert app.confirmed_booking_days(wc["WEEK_EITHER"][0]) == ("Saturday", "Sunday")
+
+
 def test_weekend_for_saturday_input():
     sat_dt = datetime(2026, 5, 30, 10, 0)
     sat, sun = bot_listener._weekend_for(sat_dt)

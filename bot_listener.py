@@ -24,6 +24,18 @@ from app import (
 from typing import Iterator, List, Optional
 
 
+# Weekend-confirmation buttons → (stored decision, restricted day or None for
+# either). WEEK_YES is kept for backward compatibility with any older prompt
+# message still sitting in a chat.
+WEEKEND_COMMANDS = {
+    "WEEK_SAT": ("confirmed_sat", "Saturday"),
+    "WEEK_SUN": ("confirmed_sun", "Sunday"),
+    "WEEK_EITHER": ("confirmed", None),
+    "WEEK_YES": ("confirmed", None),
+    "WEEK_NO": ("declined", None),
+}
+
+
 @contextmanager
 def open_booker() -> Iterator[CPDBooker]:
     """Open a fresh logged-in browser for a single Telegram action.
@@ -175,8 +187,9 @@ def run() -> None:
             offset = update["update_id"] + 1
 
             # Parse the update. Callbacks are self-contained: BOOK_<iso>,
-            # REFRESH_<sat_date>, SKIP, WEEK_YES, WEEK_NO. Text replies are a
-            # limited fallback (YES/NO for weekend confirmation only).
+            # REFRESH_<sat_date>, SKIP, WEEK_SAT/WEEK_SUN/WEEK_EITHER/WEEK_NO
+            # (weekend confirmation). Text replies are a limited fallback for
+            # weekend confirmation only.
             command = None
             target_dt = None
             target_sat = None
@@ -188,7 +201,7 @@ def run() -> None:
                 data = cq.get("data", "").strip()
                 if data == "SKIP":
                     command = "SKIP"
-                elif data in ("WEEK_YES", "WEEK_NO"):
+                elif data in WEEKEND_COMMANDS:
                     command = data
                 elif data.startswith("BOOK_"):
                     try:
@@ -215,34 +228,45 @@ def run() -> None:
                 if str(msg.get("from", {}).get("id", "")) != chat_id:
                     continue
                 text = (msg.get("text") or "").strip().upper()
-                if text in ("YES", "Y"):
-                    command = "WEEK_YES"
-                elif text == "NO":
+                if text in ("YES", "Y", "EITHER", "BOTH"):
+                    command = "WEEK_EITHER"
+                elif text in ("NO", "N", "SKIP"):
                     command = "WEEK_NO"
+                elif text in ("SAT", "SATURDAY"):
+                    command = "WEEK_SAT"
+                elif text in ("SUN", "SUNDAY"):
+                    command = "WEEK_SUN"
                 else:
-                    continue  # text replies only matter for YES/NO
+                    continue  # text replies only matter for weekend confirmation
             else:
                 continue
 
             # ── Weekend confirmation ─────────────────────────────────────────
-            if command in ("WEEK_YES", "WEEK_NO"):
+            if command in WEEKEND_COMMANDS:
                 pending_weekend = load_pending_weekend()
                 if not pending_weekend:
                     send_telegram("No pending weekend question — nothing to confirm.")
                     continue
                 sat = datetime.fromisoformat(pending_weekend["saturday"])
                 sun = datetime.fromisoformat(pending_weekend["sunday"])
-                if command == "WEEK_YES":
-                    set_weekend_decision(sat, sun, "confirmed")
-                    send_telegram(
-                        f"✅ Got it — I'll book for {sat.strftime('%a %b %-d')}/"
-                        f"{sun.strftime('%a %b %-d')} on Sunday morning."
-                    )
-                else:
-                    set_weekend_decision(sat, sun, "declined")
+                decision, day = WEEKEND_COMMANDS[command]
+                set_weekend_decision(sat, sun, decision)
+                if decision == "declined":
                     send_telegram(
                         f"👍 Skipping {sat.strftime('%a %b %-d')}/"
                         f"{sun.strftime('%a %b %-d')}. I'll ask again about the next weekend."
+                    )
+                elif day:  # specific day
+                    chosen = sat if day == "Saturday" else sun
+                    send_telegram(
+                        f"✅ Got it — I'll book {chosen.strftime('%A %b %-d')} "
+                        f"on Sunday morning."
+                    )
+                else:  # either day
+                    send_telegram(
+                        f"✅ Got it — I'll book either day "
+                        f"({sat.strftime('%a %b %-d')}/{sun.strftime('%a %b %-d')}) "
+                        f"on Sunday morning."
                     )
                 clear_pending_weekend()
                 continue

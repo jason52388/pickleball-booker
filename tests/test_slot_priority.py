@@ -1,8 +1,8 @@
-"""Auto-book slot selection prioritizes start hours 10am -> 9am -> 8am.
+"""Auto-book slot selection prioritizes start hours 10am -> 9am -> 11am -> 8am.
 
 `choose_auto_book_slot` picks one slot from the scraped weekend. Within the
-preferred window it must prefer 10am, then 9am, then 8am, ahead of day-of-week
-and ahead of any in-window hour that isn't on the priority list (e.g. 11am).
+preferred window it must prefer 10am, then 9am, then 11am, then 8am, ahead of
+day-of-week and ahead of any in-window hour that isn't on the priority list.
 """
 from datetime import datetime
 
@@ -56,18 +56,33 @@ def test_saturday_wins_tiebreak_at_same_hour():
     assert picked.day_label == "Saturday"
 
 
-def test_unlisted_in_window_hour_is_last_resort():
-    # 11am is inside the preferred window (8-11) but not on the priority list,
-    # so a listed hour (8am) still wins over it.
+def test_11am_beats_9am_is_false():
+    # 9am outranks 11am in the priority list (10 -> 9 -> 11 -> 8).
+    sat = [_at(SAT, 11), _at(SAT, 9)]
+    picked = app.choose_auto_book_slot(sat, [])
+    assert picked.start.hour == 9
+
+
+def test_11am_beats_8am():
+    # 11am now ranks ahead of 8am (10 -> 9 -> 11 -> 8).
     sat = [_at(SAT, 11), _at(SAT, 8)]
+    picked = app.choose_auto_book_slot(sat, [])
+    assert picked.start.hour == 11
+
+
+def test_8am_booked_when_only_option():
+    sat = [_at(SAT, 8)]
     picked = app.choose_auto_book_slot(sat, [])
     assert picked.start.hour == 8
 
 
-def test_unlisted_hour_booked_when_nothing_else():
-    sat = [_at(SAT, 11)]
+def test_unlisted_in_window_hour_is_last_resort(monkeypatch):
+    # An hour inside the window but absent from the priority list ranks after
+    # every listed hour. Drop 11am from the list so 11am is the unlisted hour.
+    monkeypatch.setenv("PREFERRED_HOUR_PRIORITY", "10,9,8")
+    sat = [_at(SAT, 11), _at(SAT, 8)]
     picked = app.choose_auto_book_slot(sat, [])
-    assert picked.start.hour == 11
+    assert picked.start.hour == 8
 
 
 def test_no_preferred_slots_returns_none():

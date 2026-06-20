@@ -54,6 +54,40 @@ def test_set_and_get_decision_declined(tmp_state):
     assert app.get_weekend_decision(sat, sun) == "declined"
 
 
+def test_set_and_get_decision_saturday_only(tmp_state):
+    sat = datetime(2026, 5, 30)
+    sun = datetime(2026, 5, 31)
+    app.set_weekend_decision(sat, sun, "confirmed_sat")
+    assert app.get_weekend_decision(sat, sun) == "confirmed_sat"
+
+
+def test_set_and_get_decision_sunday_only(tmp_state):
+    sat = datetime(2026, 5, 30)
+    sun = datetime(2026, 5, 31)
+    app.set_weekend_decision(sat, sun, "confirmed_sun")
+    assert app.get_weekend_decision(sat, sun) == "confirmed_sun"
+
+
+def test_confirmed_booking_days_specific_day():
+    assert app.confirmed_booking_days("confirmed_sat") == ("Saturday",)
+    assert app.confirmed_booking_days("confirmed_sun") == ("Sunday",)
+
+
+def test_confirmed_booking_days_either_none_and_legacy():
+    both = ("Saturday", "Sunday")
+    assert app.confirmed_booking_days("confirmed") == both  # Either
+    assert app.confirmed_booking_days(None) == both         # no reply → default
+    assert app.confirmed_booking_days("YES") == both        # legacy / unknown
+
+
+def test_is_confirmed_decision():
+    assert app.is_confirmed_decision("confirmed")
+    assert app.is_confirmed_decision("confirmed_sat")
+    assert app.is_confirmed_decision("confirmed_sun")
+    assert not app.is_confirmed_decision("declined")
+    assert not app.is_confirmed_decision(None)
+
+
 def test_decisions_isolated_per_weekend(tmp_state):
     sat1, sun1 = datetime(2026, 5, 30), datetime(2026, 5, 31)
     sat2, sun2 = datetime(2026, 6, 6), datetime(2026, 6, 7)
