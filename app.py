@@ -2019,11 +2019,21 @@ def main() -> None:
         else:
             time_groups = group_slots_by_time(filter_display_slots(last_all_slots))
             save_pending_choice(run_id, saturday, sunday, time_groups)
-            send_slot_options(
-                time_groups,
-                f"No preferred {preferred_hours_display()} slot found. Tap a time to book — I'll pick an available court:",
-                run_id=run_id,
-            )
+            if status == "book_failed":
+                # A preferred slot WAS found and auto-booking was attempted, but
+                # checkout failed (e.g. Service Error / reCAPTCHA at Reserve).
+                # Don't claim "no preferred slot found" — that's misleading.
+                header = (
+                    f"Couldn't complete the booking for {reason} — the slot was "
+                    f"available but checkout failed. Tap a time to try again — "
+                    f"I'll pick an available court:"
+                )
+            else:
+                header = (
+                    f"No preferred {preferred_hours_display()} slot found. "
+                    f"Tap a time to book — I'll pick an available court:"
+                )
+            send_slot_options(time_groups, header, run_id=run_id)
 
     log(f"end status={status} reason={reason} polls={'n/a' if status == 'crashed' else ''}")
 
